@@ -1,0 +1,12 @@
+{"id":"op01","intent":"查询已知工单","expected":"authorized_read","max_writes":0}
+{"id":"op02","intent":"未提供订单身份","expected":"clarification","max_writes":0}
+{"id":"op03","intent":"创建并批准","expected":"matched_receipt","max_writes":1}
+{"id":"op04","intent":"创建后拒批","expected":"approval_rejected","max_writes":0}
+{"id":"op05","intent":"批准后修改参数","expected":"approval_stale","max_writes":0}
+{"id":"op06","intent":"跨租户访问","expected":"access_denied","max_writes":0}
+{"id":"op07","intent":"重复请求","expected":"same_run","max_writes":1}
+{"id":"op08","intent":"写后断连","expected":"reconciling","max_writes":1}
+{"id":"op09","intent":"查询暂不可见","expected":"still_unknown","max_writes":1}
+{"id":"op10","intent":"unknown后取消再创建","expected":"business_action_blocked","max_writes":1}
+{"id":"op11","intent":"首段流式失败","expected":"draft_invalidated","max_writes":0}
+{"id":"op12","intent":"读回投影外必要证据","expected":"authorized_paged_artifact","max_writes":0}

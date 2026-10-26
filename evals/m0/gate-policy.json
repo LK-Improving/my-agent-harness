@@ -1,0 +1,15 @@
+{
+  "version": "m0-compatibility-v1",
+  "scope": "synthetic-compatibility-probe-only",
+  "k": 5,
+  "dense_vector_mode": "deterministic-character-hash",
+  "semantic_embedding_quality_verified": false,
+  "requirements": {
+    "tenant_or_revoked_leaks": 0,
+    "required_compatibility_cases_missing": 0,
+    "bm25_answer_recall_at_5_min": 1.0,
+    "hybrid_answer_recall_at_5_min": 1.0
+  },
+  "quality_thresholds_for_real_qwen_embedding": null,
+  "note": "门限用于小样本结构兼容检查；不得作为真实业务质量结论，真实模型门限需在调参前另行冻结。"
+}

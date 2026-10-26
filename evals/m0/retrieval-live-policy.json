@@ -1,0 +1,20 @@
+{
+  "version": "m0-retrieval-live-v1",
+  "scope": "synthetic-feasibility-only",
+  "k": 5,
+  "rrf_k0": 60,
+  "analyzer": {"tokenizer": "jieba"},
+  "dense_index": "FLAT",
+  "dense_metric": "COSINE",
+  "sparse_index": "SPARSE_INVERTED_INDEX",
+  "sparse_metric": "BM25",
+  "requirements": {
+    "dense_recall_at_5_min": 1.0,
+    "bm25_recall_at_5_min": 1.0,
+    "hybrid_recall_at_5_min": 1.0,
+    "rerank_mrr_at_5_min": 1.0,
+    "unauthorized_results_max": 0,
+    "missing_cases_max": 0
+  },
+  "note": "首次真实调用前冻结；开发集与holdout分别报告，负例只验证隔离，不以候选为空证明无答案。不是生产检索质量门限。"
+}

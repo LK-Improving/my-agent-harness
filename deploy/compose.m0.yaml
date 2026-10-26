@@ -1,0 +1,44 @@
+name: agent-harness-m0
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: harness_m0
+      POSTGRES_USER: harness_m0
+      POSTGRES_PASSWORD: ${HARNESS_M0_PG_PASSWORD:?请先设置本项目测试数据库密码}
+    ports:
+      - "127.0.0.1:15432:5432"
+    volumes:
+      - harness_m0_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harness_m0 -d harness_m0"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    mem_limit: 384m
+  milvus:
+    image: milvusdb/milvus:v2.6.0
+    profiles: [rag]
+    command: [milvus, run, standalone]
+    environment:
+      DEPLOY_MODE: STANDALONE
+      ETCD_USE_EMBED: "true"
+      ETCD_DATA_DIR: /var/lib/milvus/etcd
+      ETCD_CONFIG_PATH: /milvus/configs/embedEtcd.yaml
+      COMMON_STORAGETYPE: local
+    ports:
+      - "127.0.0.1:19531:19530"
+      - "127.0.0.1:19091:9091"
+    volumes:
+      - harness_m0_milvus:/var/lib/milvus
+      - ./milvus-embed.yaml:/milvus/configs/embedEtcd.yaml:ro
+    healthcheck:
+      test: [CMD, curl, -f, http://localhost:9091/healthz]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+    mem_limit: 3g
+volumes:
+  harness_m0_pg:
+  harness_m0_milvus:

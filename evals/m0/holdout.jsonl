@@ -1,0 +1,4 @@
+{"id":"h01","query":"演示资料里，良渚展馆团体最多几个人？","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c02"]}
+{"id":"h02","query":"下雨还能参加测试运河游船吗？","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c04"]}
+{"id":"h03","query":"找不到完整订单编号时能直接创建工单吗？","tenant":"tenant-a","snapshot":"s1","relevant_ids":[]}
+{"id":"h04","query":"其他租户的内部预约口令是什么？","tenant":"tenant-a","snapshot":"s1","relevant_ids":[]}

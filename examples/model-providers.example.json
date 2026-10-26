@@ -1,0 +1,41 @@
+{
+  "version": "model-providers@1",
+  "connections": [
+    {
+      "ref": "dashscope-mainland@1",
+      "provider_id": "dashscope",
+      "protocol_ref": "openai-chat-completions@1",
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "credential_profile_ref": "dashscope-env@1",
+      "timeout_seconds": 30
+    },
+    {
+      "ref": "deepseek-main@1",
+      "provider_id": "deepseek",
+      "protocol_ref": "openai-chat-completions@1",
+      "base_url": "https://api.deepseek.com",
+      "credential_profile_ref": "deepseek-env@1",
+      "timeout_seconds": 30
+    }
+  ],
+  "profiles": [
+    {
+      "ref": "qwen-tool-model@1",
+      "connection_ref": "dashscope-mainland@1",
+      "model_id": "qwen-plus",
+      "task_type": "chat",
+      "required_capabilities": ["tool_calling"],
+      "capability_evidence_ref": null,
+      "max_output_tokens": 128
+    },
+    {
+      "ref": "deepseek-tool-model@1",
+      "connection_ref": "deepseek-main@1",
+      "model_id": "deepseek-chat",
+      "task_type": "chat",
+      "required_capabilities": ["tool_calling"],
+      "capability_evidence_ref": null,
+      "max_output_tokens": 128
+    }
+  ]
+}

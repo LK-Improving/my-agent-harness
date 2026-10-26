@@ -1,0 +1,55 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agent-harness"
+version = "0.0.1"
+description = "面向业务应用的受控 Agent 工程基座"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn>=0.35,<1",
+  "pydantic>=2.11,<3",
+  "langchain>=1,<2",
+  "langgraph>=1,<2",
+  "langgraph-checkpoint-postgres>=3,<4",
+  "psycopg[binary,pool]>=3.2,<4",
+  "httpx>=0.28,<1",
+  "python-dotenv>=1,<2",
+  "psutil>=7,<8",
+  "anyio>=4,<5",
+]
+
+[project.optional-dependencies]
+rag = ["pymilvus>=2.6,<2.7"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.4,<10",
+    "pytest-asyncio>=1,<2",
+    "ruff>=0.12,<1",
+    "mypy>=1.17,<2",
+    "types-psutil>=7.2.2.20260906",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["packages/harness", "domain_tools"]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+files = ["packages/harness"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-ra --strict-markers"
+markers = ["integration: 需要本项目隔离 PostgreSQL", "poc: M0 框架与故障探针", "rag: 需要本项目隔离 Milvus"]

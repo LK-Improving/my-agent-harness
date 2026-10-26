@@ -1,0 +1,15 @@
+{
+  "version": "development-execution@1",
+  "route": {
+    "provider": "dashscope", "model": "qwen-plus", "adapter_ref": "dashscope-http@1",
+    "configuration_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+    "capabilities": ["tool_calling"], "capabilities_verified": false,
+    "context_window_tokens": null, "max_output_tokens": 128, "price_version_ref": null
+  },
+  "budget": {
+    "version": "bounded-estimate-standard@1", "max_input_tokens": 16000,
+    "max_output_tokens": 128, "max_total_tokens": 32000, "execution_budget_ms": 120000
+  },
+  "counter_ref": "utf8-envelope@1", "safety_margin_tokens": 512,
+  "checkpoint_verification_timeout_seconds": 10
+}

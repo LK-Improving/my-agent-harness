@@ -1,0 +1,20 @@
+name: agent-harness-core
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: harness_runtime
+      POSTGRES_USER: harness_runtime
+      POSTGRES_PASSWORD: ${HARNESS_CORE_PG_PASSWORD:?请在本地.env填写独立核心库密码}
+    ports:
+      - "127.0.0.1:15435:5432"
+    volumes:
+      - core_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U harness_runtime -d harness_runtime"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    mem_limit: 512m
+volumes:
+  core_postgres:

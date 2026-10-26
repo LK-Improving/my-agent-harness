@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "qwen-tool-model@1": {
+      "provider": "dashscope", "model_env": "QWEN_CHAT_MODEL",
+      "required_capabilities": ["tool_calling"], "max_retries": 0,
+      "capabilities_verified": false, "price_version": null
+    },
+    "qwen-answer-model@1": {
+      "provider": "dashscope", "model_env": "QWEN_CHAT_MODEL",
+      "required_capabilities": [], "max_retries": 0,
+      "capabilities_verified": false, "price_version": null
+    }
+  }
+}

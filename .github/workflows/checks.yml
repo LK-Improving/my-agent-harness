@@ -1,0 +1,53 @@
+name: checks
+on: [push, pull_request]
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    services:
+      postgres-write-sandbox:
+        image: postgres:17
+        env:
+          POSTGRES_USER: sandbox
+          POSTGRES_PASSWORD: ci-isolated-only
+          POSTGRES_DB: operations_write_sandbox
+        ports: ["15434:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sandbox -d operations_write_sandbox"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+      postgres-m1:
+        image: postgres:17
+        env:
+          POSTGRES_USER: harness_m1
+          POSTGRES_PASSWORD: ci-isolated-only
+          POSTGRES_DB: harness_m1_test
+        ports: ["15433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U harness_m1 -d harness_m1_test"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: harness_m0
+          POSTGRES_PASSWORD: ci-isolated-only
+          POSTGRES_DB: harness_m0
+        ports: ["15432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U harness_m0 -d harness_m0"
+          --health-interval 2s --health-timeout 3s --health-retries 20
+    env:
+      HARNESS_ENVIRONMENT: development
+      HARNESS_SANDBOX_DSN: postgresql://sandbox:ci-isolated-only@127.0.0.1:15434/operations_write_sandbox
+      HARNESS_SANDBOX_TOKEN: ci-only-isolated-sandbox-token-0000000000
+      HARNESS_M1_TEST_DSN: postgresql://harness_m1:ci-isolated-only@127.0.0.1:15433/harness_m1_test
+      HARNESS_TEST_DSN: postgresql://harness_m0:ci-isolated-only@127.0.0.1:15432/harness_m0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.9.16"
+          python-version: "3.13"
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run mypy
+      - run: uv run pytest tests/unit tests/integration

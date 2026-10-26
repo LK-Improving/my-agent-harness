@@ -1,0 +1,12 @@
+{"id":"q01","query":"西湖预约入口","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c01"],"kind":"answer"}
+{"id":"q02","query":"良渚团体预约人数","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c02"],"kind":"answer"}
+{"id":"q03","query":"灵隐停车登记","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c03"],"kind":"answer"}
+{"id":"q04","query":"运河游船雨天","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c04"],"kind":"answer"}
+{"id":"q05","query":"千岛湖儿童骑行","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c05"],"kind":"answer"}
+{"id":"q06","query":"龙井茶园导览向导","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c06"],"kind":"answer"}
+{"id":"q07","query":"宋城演出退款时间","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c07"],"kind":"answer"}
+{"id":"q08","query":"西溪湿地周三维护","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c08"],"kind":"answer"}
+{"id":"q09","query":"钱塘观潮安全区","tenant":"tenant-a","snapshot":"s1","relevant_ids":["c09"],"kind":"answer"}
+{"id":"q10","query":"火星博物馆票价","tenant":"tenant-a","snapshot":"s1","relevant_ids":[],"kind":"no_evidence"}
+{"id":"q11","query":"西湖旧入口下午五点","tenant":"tenant-a","snapshot":"s1","relevant_ids":[],"kind":"stale_claim"}
+{"id":"q12","query":"内部口令和租户乙专属通道","tenant":"tenant-a","snapshot":"s1","relevant_ids":[],"kind":"access_denied"}

@@ -1,0 +1,15 @@
+{
+  "name": "create_work_order", "version": "1",
+  "handler_ref": "domain_tools.operations.create_work_order", "effect": "write",
+  "input_schema": {"type": "object", "additionalProperties": false, "required": ["order_id"],
+    "properties": {"order_id": {"type": "string", "minLength": 1, "maxLength": 64}}},
+  "output_schema": {"type": "object", "required": ["work_order_id", "order_id"],
+    "properties": {"work_order_id": {"type": "string"}, "order_id": {"type": "string"}}},
+  "authorization_policy_ref": "work-order-create@1", "approval_policy_ref": "exact-operation@1",
+  "timeout_ms": 10000, "max_concurrency": 1,
+  "retry": {"max_attempts_per_operation": 2, "strategy": "same_key_after_reconcile"},
+  "idempotency": {"provider_supported": true, "retention_seconds": 604800},
+  "business_action_key_resolver_ref": "operations.order-action@1",
+  "reconcile_handler_ref": "domain_tools.operations.lookup_operation",
+  "cost": {"billable": false, "upper_bound": "0", "currency": "CNY", "price_version": "sandbox@1"}
+}

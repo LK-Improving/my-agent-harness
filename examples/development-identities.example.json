@@ -1,0 +1,23 @@
+{
+  "REPLACE_WITH_A_RANDOM_TOKEN_OF_AT_LEAST_32_CHARACTERS": {
+    "tenant_id": "local-evaluation",
+    "subject_id": "local-developer",
+    "application_id": "harness-development",
+    "roles": ["release_admin", "evaluation_admin", "evaluator", "user"],
+    "resource_scopes": ["work_orders:read:synthetic", "work_orders:write:synthetic"]
+  },
+  "REPLACE_APPROVER_WITH_ANOTHER_RANDOM_TOKEN_32_OR_MORE": {
+    "tenant_id": "local-evaluation",
+    "subject_id": "local-approver",
+    "application_id": "harness-development",
+    "roles": ["approver", "reconciler"],
+    "resource_scopes": ["work_orders:read:synthetic", "work_orders:write:synthetic"]
+  },
+  "REPLACE_RECOVERY_WITH_ANOTHER_RANDOM_TOKEN_32_OR_MORE": {
+    "tenant_id": "local-evaluation",
+    "subject_id": "local-recovery-operator",
+    "application_id": "harness-development",
+    "roles": ["recovery_operator"],
+    "resource_scopes": ["harness:recovery:local"]
+  }
+}

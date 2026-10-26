@@ -1,0 +1,15 @@
+{
+  "agent_id": "travel_assistant", "release_id": "travel-m0-candidate",
+  "graph_template": "rag_chat", "graph_version": "rag-chat-v1",
+  "prompt_ref": "travel/system@1", "model_profile_ref": "qwen-answer-model@1",
+  "knowledge_bindings": [
+    {"knowledge_base_id": "synthetic-travel", "snapshot_id": "snapshot-m0",
+     "retrieval_profile_ref": "hybrid-test@1"}
+  ],
+  "allowed_tools": [{"name": "retrieve_knowledge", "version": "1", "max_operations_per_run": 1}],
+  "policy_profile_ref": "knowledge-read-only@1", "budget_profile_ref": "bounded-estimate-standard@1",
+  "memory_profile_ref": "session-only@1", "evaluation_profile_ref": "travel-regression@1",
+  "completion_validator_ref": "travel.evidence-completion@1",
+  "timeout_profile_ref": "standard-interactive@1",
+  "stream_profile_ref": "answer-no-retry-after-publish@1"
+}
