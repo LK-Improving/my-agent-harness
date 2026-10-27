@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from typing import Protocol
 
 from harness.contracts.hashing import canonical_hash
+from harness.contracts.artifacts import ArtifactPage
 from harness.contracts.retrieval import Evidence, KnowledgeRetrieval
 from harness.contracts.runtime import AnswerCandidate, ClaimedRun, Principal, RuntimeFault
 from harness.contracts.state import ToolReceipt, ValidationReport
@@ -14,6 +15,17 @@ from domain_tools.knowledge.retrieval import KnowledgeOutput, receipt_output
 
 class ReceiptSource(Protocol):
     async def read_receipts(self, actor: Principal, run_id: str) -> tuple[ToolReceipt, ...]: ...
+
+
+def knowledge_receipts(receipts: tuple[ToolReceipt, ...]) -> tuple[ToolReceipt, ...]:
+    """内置分页回执不是新知识检索；只能从真实检索回执验证完成。"""
+    result = []
+    for receipt in receipts:
+        if receipt.cost_status == "not_billable":
+            ArtifactPage.model_validate(receipt.data)
+        else:
+            result.append(receipt)
+    return tuple(result)
 
 
 def reference(evidence: Evidence) -> str:
@@ -56,7 +68,7 @@ class KnowledgeCompletionValidator:
         self.receipts, self.service = receipts, service
 
     async def authorized(self, run: ClaimedRun, owner: str) -> tuple[tuple[ToolReceipt, ...], tuple[KnowledgeOutput, ...]]:
-        receipts = await self.receipts.read_receipts(run.principal, run.run_id)
+        receipts = knowledge_receipts(await self.receipts.read_receipts(run.principal, run.run_id))
         if len(receipts) != 1:
             raise RuntimeFault("KNOWLEDGE_TOOL_RECEIPT_MISSING", 409)
         outputs = tuple(receipt_output(run, receipt) for receipt in receipts)

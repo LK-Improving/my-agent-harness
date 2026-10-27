@@ -70,6 +70,39 @@ async def prepared():
                 await conn.execute(
                     (ROOT / "migrations/0004_extensions.sql").read_text("utf-8"), prepare=False
                 )
+            artifact_version = await (
+                await conn.execute("SELECT version FROM harness.schema_versions WHERE version=5")
+            ).fetchone()
+            if artifact_version is None:
+                await conn.execute(
+                    (ROOT / "migrations/0005_artifacts.sql").read_text("utf-8"), prepare=False
+                )
+            retention_version = await (
+                await conn.execute("SELECT version FROM harness.schema_versions WHERE version=6")
+            ).fetchone()
+            if retention_version is None:
+                await conn.execute(
+                    (ROOT / "migrations/0006_artifact_retention.sql").read_text("utf-8"), prepare=False
+                )
+            context_version = await (
+                await conn.execute("SELECT version FROM harness.schema_versions WHERE version=7")
+            ).fetchone()
+            if context_version is None:
+                await conn.execute(
+                    (ROOT / "migrations/0007_context_purpose.sql").read_text("utf-8"), prepare=False
+                )
+            summary_version = await (
+                await conn.execute("SELECT version FROM harness.schema_versions WHERE version=8")
+            ).fetchone()
+            if summary_version is None:
+                await conn.execute(
+                    (ROOT / "migrations/0008_context_summaries.sql").read_text("utf-8"), prepare=False
+                )
+            retention_version = await (
+                await conn.execute("SELECT version FROM harness.schema_versions WHERE version=9")
+            ).fetchone()
+            if retention_version is None:
+                await conn.execute((ROOT / "migrations/0009_retention.sql").read_text("utf-8"), prepare=False)
     store = PostgresRuntimeStore(dsn, AdmissionProfile())
     actor = Principal(
         tenant_id="test-" + uuid4().hex,

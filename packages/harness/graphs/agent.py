@@ -14,8 +14,9 @@ from langgraph.types import Command, interrupt
 from pydantic import Field
 
 from harness.context.projection import initial_context
+from harness.contracts.artifacts import ArtifactProjector
 from harness.contracts.execution import ExecutionLedger
-from harness.contracts.hashing import canonical_hash, canonical_json
+from harness.contracts.hashing import canonical_hash, canonical_json, checkpoint_thread_id
 from harness.contracts.release import ReleaseManifest
 from harness.contracts.runtime import AnswerCandidate, ClaimedRun, RuntimeFault
 from harness.contracts.snapshots import JsonSnapshot
@@ -64,6 +65,7 @@ class AgentEngine:
         release_guard: Callable[[ReleaseManifest], None] | None = None,
         prepare_context: Callable[[ClaimedRun, str], Awaitable[list[Any]]] | None = None,
         authorize_context: Callable[[ClaimedRun, str], Awaitable[None]] | None = None,
+        artifact_projector: ArtifactProjector | None = None,
     ) -> None:
         self.ledger, self.gateway, self.reads, self.writes = ledger, gateway, reads, writes
         self.checkpointer, self.owner, self.validate = (
@@ -80,6 +82,7 @@ class AgentEngine:
         self.prompts = MappingProxyType(dict(prompts))
         self.release_guard = release_guard
         self.prepare_context, self.authorize_context = prepare_context, authorize_context
+        self.artifact_projector = artifact_projector
 
     def observed_manifest_hash(self, release: Any) -> str:
         installed = self.releases.require(release)
@@ -102,14 +105,7 @@ class AgentEngine:
         # 每个run单独checkpoint线程；失败草稿不会污染其他run的会话历史。
         return {
             "configurable": {
-                "thread_id": "harness-"
-                + canonical_hash(
-                    {
-                        "tenant": run.principal.tenant_id,
-                        "application": run.principal.application_id,
-                        "run": run.run_id,
-                    }
-                )
+                "thread_id": checkpoint_thread_id(run.principal.tenant_id, run.principal.application_id, run.run_id)
             },
             "recursion_limit": 64,
             "max_concurrency": 1,
@@ -242,11 +238,12 @@ class AgentEngine:
                     raise RuntimeFault("WRITE_ATTEMPTS_EXHAUSTED")
             if receipt is None:
                 raise RuntimeFault("TOOL_RECEIPT_MISSING")
+            data = (await self.artifact_projector.project(run, self.owner, receipt)).materialize() if self.artifact_projector else receipt.data
             return ToolMessage(
                 content=canonical_json(
                     {
                         "operation_id": receipt.operation_id,
-                        "data": receipt.data,
+                        "data": data,
                         "status": receipt.status,
                     }
                 ),

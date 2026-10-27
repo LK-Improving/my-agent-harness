@@ -1,0 +1,12 @@
+{
+  "version": "core-retention@1",
+  "session_seconds": 2592000,
+  "event_seconds": 604800,
+  "trace_seconds": 604800,
+  "private_seconds": 7776000,
+  "max_runs": 256,
+  "max_jobs": 256,
+  "max_attempts": 3,
+  "recheck_seconds": 300,
+  "external_trace_copies": false
+}

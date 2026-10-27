@@ -41,6 +41,11 @@ def canonical_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def checkpoint_thread_id(tenant_id: str, application_id: str, run_id: str) -> str:
+    """执行和清理共用固定线程身份，不接受外部checkpoint路径。"""
+    return "harness-" + canonical_hash({"tenant": tenant_id, "application": application_id, "run": run_id})
+
+
 class RunRequest(Contract):
     request_id: Identifier
     message: str = Field(min_length=1, max_length=16000)

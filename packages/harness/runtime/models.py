@@ -5,6 +5,8 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from harness.context.projection import project_model_messages
+from harness.context.boundary import require_memory_boundary
+from harness.contracts.context import ContextBuilder, ModelCallPurpose
 from harness.contracts.execution import ExecutionLedger, ExecutionProfile
 from harness.contracts.failures import ProviderError
 from harness.contracts.models import ModelGateway, ModelResult
@@ -24,15 +26,26 @@ class GovernedModelGateway:
         *,
         release_guard: Callable[[ReleaseManifest], None] | None = None,
         context_authority: Callable[[ClaimedRun, str], Awaitable[None]] | None = None,
+        context_builder: ContextBuilder | None = None,
     ) -> None:
         self.ledger, self.transport, self.profile = ledger, transport, profile
         self.extensions = extensions or ExtensionChain()
         self.release_guard = release_guard
         self.context_authority = context_authority
+        self.context_builder = context_builder
 
     async def complete(
         self, run: ClaimedRun, owner: str, messages: JsonSnapshot, tools: JsonSnapshot
     ) -> ModelResult:
+        return await self._complete(run, owner, messages, tools)
+
+    async def complete_summary(self, run: ClaimedRun, owner: str, messages: JsonSnapshot,
+                               purpose: ModelCallPurpose) -> ModelResult:
+        return await self._complete(run, owner, messages, JsonSnapshot.capture([]), purpose=purpose)
+
+    async def _complete(self, run: ClaimedRun, owner: str, messages: JsonSnapshot,
+                        tools: JsonSnapshot, *, purpose: ModelCallPurpose | None = None) -> ModelResult:
+        require_memory_boundary(run.manifest)
         if self.release_guard is not None:
             self.release_guard(run.manifest)
         messages = project_model_messages(messages.as_object_array())
@@ -50,9 +63,13 @@ class GovernedModelGateway:
         messages = project_model_messages(
             JsonSnapshot.capture(transformed.as_object()["messages"]).as_object_array()
         )
+        if purpose is None and self.context_builder is not None:
+            built = await self.context_builder.build(run, owner, messages, tools)
+            messages = built.messages
         if self.context_authority is not None:
             await self.context_authority(run, owner)
-        reservation = await self.ledger.reserve_model(run, owner, messages, tools, self.profile)
+        reservation = (await self.ledger.reserve_purpose_model(run, owner, messages, tools, self.profile, purpose)
+                       if purpose is not None else await self.ledger.reserve_model(run, owner, messages, tools, self.profile))
         if reservation.result is not None:
             result = reservation.result.model_copy(
                 update={"draft_id": reservation.request.draft_id}
@@ -76,6 +93,8 @@ class GovernedModelGateway:
             )
             if self.context_authority is not None:
                 await self.context_authority(run, owner)
+            if purpose is not None:
+                await self.ledger.authorize_model_purpose(run, owner, messages, purpose)
         except BaseException:
             # 尚未调用传输；关键扩展/取消阻断不能伪造成未知计费请求。
             await self.ledger.fail_model(

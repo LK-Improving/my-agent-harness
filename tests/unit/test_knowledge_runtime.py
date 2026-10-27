@@ -29,7 +29,7 @@ def values():
         "knowledge_base_id": ticket.pin.knowledge_base_id, "snapshot_id": ticket.pin.snapshot_id}),)})
     manifest = ReleaseManifest(spec=spec, source_revision=None, source_tree_hash="1" * 64,
                                 dependency_lock_hash="2" * 64, prompt_hash="3" * 64,
-                                tool_schema_hashes={"retrieve_knowledge@1": "4" * 64}, model_profile={}, profiles={},
+                                tool_schema_hashes={f"{b.name}@{b.version}": "4" * 64 for b in spec.allowed_tools}, model_profile={}, profiles={},
                                 environment_profile_hash="5" * 64)
     run = ClaimedRun(run_id="run-1", session_id="session-1", principal=ticket.actor,
                      request=RunRequest(request_id="r1", message=ticket.query.query, expected_revision=0), manifest=manifest,
@@ -170,6 +170,9 @@ def test_actual_assembly_selects_optional_knowledge_without_loading_other_capabi
 
     monkeypatch.setattr("harness.bootstrap.retrieval.load_retrieval", optional)
     assembly = DevelopmentAssembly(tmp_path, owner="fixture-worker", checkpointer=None)
+    assert assembly.manifest.profiles.as_object()["context_boundary"] == {
+        "version": "session-memory-boundary@1", "memory_profile_ref": "session-only@1",
+        "automatic_long_term_profile": False, "semantic_history_recall": False, "complex_fact_extraction": False}
     if selected == "operations":
         assert not calls and assembly.retrieval is None
         assert assembly.engine.prepare_context is None and assembly.store.answer_authority is None
@@ -177,7 +180,7 @@ def test_actual_assembly_selects_optional_knowledge_without_loading_other_capabi
     else:
         assert len(calls) == 1 and calls[0]["execution"] is assembly.store
         assert assembly.engine.prepare_context is not None and assembly.store.answer_authority is not None
-        assert tuple(assembly.reads.entries) == ("retrieve_knowledge",)
+        assert tuple(assembly.reads.entries) == ("retrieve_knowledge", "read_artifact")
         assert assembly.manifest.spec.knowledge_bindings[0].snapshot_id == configuration.snapshots[0].snapshot_id
         assert assembly.manifest.profiles.as_object()["read_accounting"]
         assert assembly.manifest.spec.release_id.startswith("knowledge-development-")

@@ -24,6 +24,7 @@ class RuntimeEvent(Contract):
             "answer.delta": ("draft_id", "model_attempt_id", "delta"),
             "answer.invalidated": ("draft_id", "reason"),
             "run.completed": ("committed_draft_id", "commit_id", "result_hash"),
+            "artifact.saved": ("artifact_ref", "session_id", "content_hash", "source_operation_id"),
         }
         for key in required.get(self.type, ()):
             if self.payload.get(key) is None:
@@ -35,6 +36,8 @@ class RuntimeEvent(Contract):
 
 
 class ArtifactPage(Contract):
+    """M0同步探针页；保留旧字段，M4正式异步端口的v2页在contracts.artifacts。"""
+
     ref: Identifier
     content_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     source_ref: Identifier

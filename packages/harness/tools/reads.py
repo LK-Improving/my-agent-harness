@@ -1,4 +1,4 @@
-"""只读工具统一包装；结果过大时明确停止，不制造artifact引用。"""
+"""只读工具统一包装；原始回执与模型产物投影分别保存。"""
 
 import asyncio
 from collections.abc import Awaitable, Callable
@@ -31,6 +31,7 @@ class RegisteredRead:
     contextual_handler: Callable[[ClaimedRun, str, str, dict[str, Any]], Awaitable[Any]] | None = None
     revalidate: Callable[[ClaimedRun, str, ToolReceipt], Awaitable[None]] | None = None
     accounting_ref: Literal["child-model-ledger@1"] | None = None
+    task_guard: TaskGuard | None = None
 
 
 class ReadCoordinator:
@@ -88,7 +89,7 @@ class ReadCoordinator:
                 arguments,
                 logical_id,
                 self.extensions,
-                self.task_guard or task_guard,
+                entry.task_guard or self.task_guard or task_guard,
             )
         ).as_object()
         context = ExecutionContext(

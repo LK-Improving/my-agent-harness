@@ -6,7 +6,10 @@
     {"knowledge_base_id": "example-kb", "snapshot_id": "snapshot-REPLACE_WITH_PUBLISHED_ID",
      "retrieval_profile_ref": "hybrid-bounded@1"}
   ],
-  "allowed_tools": [{"name": "retrieve_knowledge", "version": "1", "max_operations_per_run": 1}],
+  "allowed_tools": [
+    {"name": "retrieve_knowledge", "version": "1", "max_operations_per_run": 1},
+    {"name": "read_artifact", "version": "1", "max_operations_per_run": 4}
+  ],
   "policy_profile_ref": "knowledge-read-only@1", "budget_profile_ref": "bounded-estimate-standard@1",
   "memory_profile_ref": "session-only@1", "evaluation_profile_ref": "travel-regression@1",
   "completion_validator_ref": "travel.evidence-completion@1",

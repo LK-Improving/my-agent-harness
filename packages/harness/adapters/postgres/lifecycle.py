@@ -4,13 +4,28 @@ from dataclasses import dataclass
 
 from harness.adapters.postgres.connection import Connection, Row
 from harness.adapters.postgres.events import PostgresEventJournal
+from harness.contracts.runtime import Principal
 
 
 @dataclass(frozen=True, slots=True)
 class PostgresRunLifecycle:
     events: PostgresEventJournal
 
+    async def invalidate_summary(self, conn: Connection, row: Row, code: str) -> None:
+        installed = await (await conn.execute("SELECT to_regclass('harness.summary_candidates') IS NOT NULL AS present")).fetchone()
+        if installed is None or not installed["present"]:
+            return
+        candidate = await (await conn.execute("""UPDATE harness.summary_candidates
+            SET state='invalid',invalidation_code=%s WHERE run_id=%s AND state='staged' RETURNING candidate_hash""",
+            (code, row["run_id"]))).fetchone()
+        if candidate is not None:
+            actor = Principal.model_validate(row["principal"])
+            await conn.execute("""INSERT INTO harness.audit(tenant_id,subject_id,action,resource_id)
+                VALUES(%s,%s,'summary.invalidated',%s)""", (actor.tenant_id, actor.subject_id, candidate["candidate_hash"]))
+
     async def terminate(self, conn: Connection, row: Row, status: str, code: str) -> None:
+        if row.get("cancel_requested") or status == "expired":
+            await self.invalidate_summary(conn, row, code)
         if self.events.drafts:
             draft = await (
                 await conn.execute(
@@ -64,6 +79,7 @@ class PostgresRunLifecycle:
                     {"code": code, "operations": [item["operation_id"] for item in unknown]},
                 )
                 return
+        await self.invalidate_summary(conn, row, code)
         await conn.execute(
             (
                 "UPDATE harness.runs SET "

@@ -11,6 +11,7 @@ from pydantic import Field, SecretStr
 from harness.adapters.development_auth import DevelopmentAuthenticator, LiveDevelopmentAuthenticator
 from harness.bootstrap.api import create_app
 from harness.contracts.runtime import AdmissionProfile
+from harness.contracts.retention import RetentionPolicy
 from harness.contracts.specs import Contract
 
 
@@ -23,6 +24,7 @@ class ServerSettings(Contract):
     identity_file: Path
     admission: AdmissionProfile = Field(default_factory=AdmissionProfile)
     enable_write_sandbox: bool = False
+    retention: RetentionPolicy = Field(default_factory=RetentionPolicy)
 
 
 def load_server_settings(root: Path) -> ServerSettings:
@@ -41,6 +43,10 @@ def load_server_settings(root: Path) -> ServerSettings:
             (root / profile).read_text(encoding="utf-8")
         )
     selected = values.get("HARNESS_AGENT_PROFILE", "operations")
+    retention = RetentionPolicy()
+    retention_ref = values.get("HARNESS_RETENTION_PROFILE_FILE")
+    if retention_ref:
+        retention = RetentionPolicy.model_validate_json((root / retention_ref).read_text("utf-8"))
     if selected not in {"operations", "travel"}:
         raise ValueError("HARNESS_AGENT_PROFILE仅支持operations或travel")
     return ServerSettings(
@@ -52,6 +58,7 @@ def load_server_settings(root: Path) -> ServerSettings:
         identity_file=(root / identity).resolve(),
         admission=admission,
         enable_write_sandbox=values.get("HARNESS_ENABLE_WRITE_SANDBOX", "false").lower() == "true",
+        retention=retention,
     )
 
 
@@ -71,4 +78,7 @@ def application() -> FastAPI:
         writes=assembly.store,
         reconcile=assembly.writes.reconcile if assembly.writes else None,
         model_ready=lambda: assembly.model_ready,
+        artifacts=assembly.artifacts,
+        artifact_retention=assembly.artifact_retention,
+        retention=assembly.retention,
     )

@@ -19,10 +19,19 @@ from domain_tools.operations.work_orders import (
     WorkOrderSandboxHandler,
     registered_work_order,
 )
+from harness.adapters.artifact_retention_postgres import PostgresArtifactRetention
+from harness.adapters.artifacts_postgres import PostgresArtifacts
 from harness.adapters.development_auth import LiveDevelopmentAuthenticator
+from harness.adapters.context_postgres import PostgresContextSource
+from harness.adapters.summaries_postgres import PostgresSummaryStore
 from harness.adapters.recovery_postgres import PostgresRecoveryStore
+from harness.adapters.retention_postgres import PostgresRetention
 from harness.bootstrap.providers import load_model_runtime
 from harness.bootstrap.server import load_server_settings
+from harness.contracts.artifacts import ArtifactProfile, ArtifactRetentionPolicy
+from harness.contracts.context import ContextProfile, MemoryBoundaryProfile, SummaryCommitProfile
+from harness.context.boundary import require_memory_boundary
+from harness.context.pipeline import ContextPipeline
 from harness.contracts.hashing import canonical_hash
 from harness.contracts.release import ReleaseManifest
 from harness.contracts.runtime import AnswerCandidate, ClaimedRun, RuntimeFault
@@ -33,6 +42,7 @@ from harness.graphs.agent import AgentEngine
 from harness.runtime.extensions import ExtensionChain, RegisteredExtension
 from harness.runtime.models import GovernedModelGateway
 from harness.runtime.releases import InstalledReleases, build_development_release
+from harness.tools.artifacts import registered_artifact_reader
 from harness.tools.reads import ReadCoordinator, RegisteredRead
 from harness.tools.writes import RegisteredWrite, WriteCoordinator, WriteRegistry
 
@@ -75,12 +85,26 @@ class DevelopmentAssembly:
         self._agent_path = f"agents/{self.settings.agent_profile}.json"
         self._prompt_paths = (f"prompts/{self.settings.agent_profile}/system.txt",
                               "prompts/knowledge/protocol.txt" if knowledge else "prompts/runtime/protocol.txt")
+        self._summary_prompt_path = "prompts/context/summary.txt"
+        self._summary_prompt = (root / self._summary_prompt_path).read_text("utf-8")
+        self._summary_file_hash = file_hash(root / self._summary_prompt_path)
+        self.context_profile = ContextProfile(history_mode="current_only" if knowledge else "success_history",
+            summary_prompt_hash=hashlib.sha256(self._summary_prompt.encode("utf-8")).hexdigest())
         self.store = PostgresRecoveryStore(
             self.settings.database_dsn.get_secret_value(), self.settings.admission
         )
         self.store.identity_source = LiveDevelopmentAuthenticator(
             self.settings.identity_file, self.settings.environment
         )
+        self.artifacts = PostgresArtifacts(self.store, ArtifactProfile())
+        self.store.retention_policy = self.settings.retention
+        # API只登记/查看；实际副本清理端口仅由显式运维命令安装。
+        self.retention = PostgresRetention(self.store)
+        self.artifact_retention = PostgresArtifactRetention(self.artifacts, ArtifactRetentionPolicy(), executor_installed=True)
+        self.summary_store = PostgresSummaryStore(self.store)
+        self.summary_commit_profile = SummaryCommitProfile()
+        self.store.summary_authority = self.summary_store.commit_in_transaction
+        self.store.summary_authority_ref = self.summary_commit_profile.version
         self.extensions = ExtensionChain(
             extensions, record_decision=partial(self.store.record_extension, owner)
         )
@@ -143,7 +167,8 @@ class DevelopmentAssembly:
 
             read_entry = registered_sandbox_query(write_entries[0].handler)
         self.reads = ReadCoordinator(
-            self.store, (read_entry,), extensions=self.extensions, task_guard=task_guard
+            self.store, (read_entry, registered_artifact_reader(self.artifacts)),
+            extensions=self.extensions, task_guard=task_guard
         )
         self.writes = (
             WriteCoordinator(
@@ -169,7 +194,7 @@ class DevelopmentAssembly:
             if self.retrieval is None:
                 raise RuntimeFault("KNOWLEDGE_RUNTIME_REQUIRED", 503)
             self.knowledge_validator = KnowledgeCompletionValidator(self.store, self.retrieval.service)
-            self.knowledge_context = KnowledgeContext(self.reads, self.knowledge_validator)
+            self.knowledge_context = KnowledgeContext(self.reads, self.knowledge_validator, self.artifacts)
             self.store.answer_authority = self.authorize_answer
             self.store.resource_authority = self.retrieval.repository.authorize_public_read
             self.store.resource_authority_ref = "knowledge-read@1"
@@ -233,7 +258,13 @@ class DevelopmentAssembly:
         self._dependencies_match = dependencies_match
         self._installed_versions = installed
         self.store.new_run_ready = lambda: self.model_ready
-        profiles = {"execution": self.profile.model_dump(mode="json"), "environment": env}
+        profiles = {"execution": self.profile.model_dump(mode="json"), "environment": env,
+                    "retention": self.settings.retention.model_dump(mode="json")}
+        profiles["artifacts"] = self.artifacts.profile.model_dump(mode="json")
+        profiles["artifact_retention"] = self.artifact_retention.policy.model_dump(mode="json")
+        profiles["context"] = self.context_profile.model_dump(mode="json")
+        profiles["context_boundary"] = MemoryBoundaryProfile().model_dump(mode="json")
+        profiles["summary_commit"] = self.summary_commit_profile.model_dump(mode="json")
         profiles["extensions"] = self.extensions.snapshot.as_object()
         if self.model_runtime.binding_snapshot is not None:
             profiles["model_binding"] = self.model_runtime.binding_snapshot.as_object()
@@ -257,6 +288,7 @@ class DevelopmentAssembly:
             release_prefix="knowledge-development" if knowledge else "operations-development",
         )
         spec = manifest.spec
+        require_memory_boundary(manifest)
         self.releases = InstalledReleases((manifest,))
         if expected_release is not None:
             self.releases.require(expected_release)
@@ -266,16 +298,15 @@ class DevelopmentAssembly:
             for name in self._prompt_paths
         }
         self.manifest = manifest
+        gateway = GovernedModelGateway(
+            self.store, self.model_runtime.transport, self.profile, self.extensions,
+            release_guard=self.assert_compatible, context_authority=self.authorize_model_context)
+        self.context_pipeline = ContextPipeline(PostgresContextSource(self.store), self.artifacts,
+            gateway.complete_summary, self.profile, self.context_profile, self._summary_prompt, self.summary_store)
+        gateway.context_builder = self.context_pipeline
         self.engine = AgentEngine(
             self.store,
-            GovernedModelGateway(
-                self.store,
-                self.model_runtime.transport,
-                self.profile,
-                self.extensions,
-                release_guard=self.assert_compatible,
-                context_authority=self.knowledge_context.authorize if self.knowledge_context else None,
-            ),
+            gateway,
             self.reads,
             self.writes,
             checkpointer,
@@ -287,14 +318,22 @@ class DevelopmentAssembly:
             self.extensions,
             release_guard=self.assert_compatible,
             prepare_context=self.knowledge_context.prepare if self.knowledge_context else None,
-            authorize_context=self.knowledge_context.authorize if self.knowledge_context else None,
+            authorize_context=self.authorize_model_context,
+            artifact_projector=self.artifacts,
         )
+
+    async def authorize_model_context(self, run: ClaimedRun, owner: str) -> None:
+        await self.artifacts.authorize_context(run, owner)
+        await self.context_pipeline.authorize(run, owner)
+        if self.knowledge_context is not None:
+            await self.knowledge_context.authorize(run, owner)
 
     def assert_compatible(self, release: ReleaseManifest) -> None:
         self.releases.require(release)
         try:
             if (
                 source_hash(self.root) != self.manifest.source_tree_hash
+                or file_hash(self.root / self._summary_prompt_path) != self._summary_file_hash
                 or file_hash(self.root / "uv.lock") != self.manifest.dependency_lock_hash
                 or file_hash(self.root / self._agent_path) != self._agent_file_hash
                 or any(
@@ -397,11 +436,11 @@ class DevelopmentAssembly:
         """答案公开与业务commit事务内复查；只执行本地PG查询和纯完成校验。"""
         if self.retrieval is None:
             raise RuntimeFault("KNOWLEDGE_AUTHORITY_NOT_INSTALLED", 503)
-        from domain_tools.knowledge.completion import validate_knowledge
+        from domain_tools.knowledge.completion import knowledge_receipts, validate_knowledge
         from domain_tools.knowledge.retrieval import receipt_output
         from harness.adapters.postgres.queries import PostgresEvidenceQueries
 
-        receipts = await PostgresEvidenceQueries.read_receipts(conn, run.run_id)
+        receipts = knowledge_receipts(await PostgresEvidenceQueries.read_receipts(conn, run.run_id))
         outputs = tuple(receipt_output(run, receipt) for receipt in receipts)
         for output in outputs:
             for result in output.results:

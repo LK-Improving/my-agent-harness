@@ -6,13 +6,15 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Annotated, Any
 
 import anyio
-from fastapi import Depends, FastAPI, Header, Path, Request
+from fastapi import Depends, FastAPI, Header, Path, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from harness.contracts.artifacts import ArtifactDeletionRequest, ArtifactRead, ArtifactReader, ArtifactRetention
 from harness.contracts.hashing import RunRequest
 from harness.contracts.release import ReleaseManifest
+from harness.contracts.retention import CleanupRequest, RetentionManager
 from harness.contracts.runtime import (
     CancelRequest,
     EvaluationRequest,
@@ -71,6 +73,9 @@ def create_app(
     reconcile: Callable[[Principal, str, ReconcileRequest], Awaitable[WriteOperation]]
     | None = None,
     model_ready: Callable[[], bool] | None = None,
+    artifacts: ArtifactReader | None = None,
+    artifact_retention: ArtifactRetention | None = None,
+    retention: RetentionManager | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Agent Harness", version="0.1.0", debug=False)
     app.add_middleware(BodyLimitMiddleware)
@@ -101,6 +106,53 @@ def create_app(
 
     Actor = Annotated[Principal, Depends(principal)]
     ResourceId = Annotated[Identifier, Path()]
+    ArtifactId = Annotated[str, Path(pattern=r"^artifact-[a-f0-9]{32}$")]
+
+    @app.post("/api/v1/sessions/{session_id}/cleanup-requests")
+    async def cleanup_request(session_id: ResourceId, body: CleanupRequest, actor: Actor) -> Any:
+        if retention is None:
+            raise RuntimeFault("RETENTION_MANAGER_NOT_INSTALLED", 503)
+        return await retention.request(actor, session_id, body)
+
+    @app.get("/api/v1/cleanup-requests/{job_id}")
+    async def cleanup_view(job_id: ResourceId, actor: Actor) -> Any:
+        if retention is None:
+            raise RuntimeFault("RETENTION_MANAGER_NOT_INSTALLED", 503)
+        await store.admit_read(actor)
+        return await retention.inspect(actor, job_id)
+
+    @app.get("/api/v1/sessions/{session_id}/artifacts/{artifact_ref}/retention")
+    async def artifact_retention_view(session_id: ResourceId, artifact_ref: ArtifactId, actor: Actor,
+                                       response: Response) -> Any:
+        if artifact_retention is None:
+            raise RuntimeFault("ARTIFACT_RETENTION_NOT_INSTALLED", 503)
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await artifact_retention.inspect(actor, session_id, artifact_ref)
+
+    @app.post("/api/v1/sessions/{session_id}/artifacts/{artifact_ref}/deletion-requests", status_code=202)
+    async def artifact_deletion(session_id: ResourceId, artifact_ref: ArtifactId, body: ArtifactDeletionRequest,
+                                actor: Actor, response: Response) -> Any:
+        if artifact_retention is None:
+            raise RuntimeFault("ARTIFACT_RETENTION_NOT_INSTALLED", 503)
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await artifact_retention.request_deletion(actor, session_id, artifact_ref, body)
+
+    @app.get("/api/v1/sessions/{session_id}/artifacts/{artifact_ref}")
+    async def artifact(session_id: ResourceId, artifact_ref: ResourceId, actor: Actor, response: Response,
+                       offset: int = 0, limit: int = 2000) -> Any:
+        if artifacts is None:
+            raise RuntimeFault("ARTIFACT_READER_NOT_INSTALLED", 503)
+        from pydantic import ValidationError
+
+        try:
+            page = ArtifactRead(artifact_ref=artifact_ref, offset=offset, limit=limit)
+        except ValidationError:
+            raise RuntimeFault("ARTIFACT_PAGE_INVALID", 422) from None
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await artifacts.read(actor, session_id, page)
 
     @app.get("/api/health/live")
     async def live() -> dict[str, bool]:
@@ -212,6 +264,9 @@ def create_app(
                         )
                         await store.renew_sse(current_actor, lease)
                         await store.get_run(current_actor, run_id)
+                        validate_cursor = getattr(store, "validate_event_cursor", None)
+                        if validate_cursor is not None:
+                            await validate_cursor(current_actor, run_id, cursor)
                         cursor = int(str(event["seq"]))
                         yield (
                             f"id: {cursor}\nevent: {event['type']}\n"

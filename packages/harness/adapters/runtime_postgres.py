@@ -14,7 +14,9 @@ from harness.adapters.postgres.events import PostgresEventJournal
 from harness.adapters.postgres.lifecycle import PostgresRunLifecycle
 from harness.adapters.postgres.mapping import run_view
 from harness.adapters.postgres.queries import PostgresEvidenceQueries
+from harness.context.boundary import require_memory_boundary
 from harness.contracts.events import RuntimeEvent
+from harness.contracts.context import ContextProfile, SummaryCommitProfile
 from harness.contracts.hashing import RunRequest, canonical_hash
 from harness.contracts.release import EvaluationContext, ReleaseManifest
 from harness.contracts.runtime import (
@@ -29,9 +31,13 @@ from harness.contracts.runtime import (
     SessionRequest,
 )
 from harness.contracts.snapshots import JsonSnapshot
+from harness.contracts.retention import RetentionPolicy
 
 
 class PostgresRuntimeStore:
+    retention_policy = RetentionPolicy()
+    summary_authority: Callable[[Connection, str, ClaimedRun, AnswerCandidate, str], Awaitable[None]] | None = None
+    summary_authority_ref: str | None = None
     answer_authority: Callable[[Connection, str, ClaimedRun, AnswerCandidate], Awaitable[None]] | None = None
     resource_authority: Callable[[Connection, Principal, Row, Row], Awaitable[None]] | None = None
     resource_authority_ref: str | None = None
@@ -211,8 +217,8 @@ class PostgresRuntimeStore:
             session_id = uuid4().hex
             await conn.execute(
                 """INSERT INTO harness.sessions
-                   (session_id,tenant_id,subject_id,application_id,agent_id,release_id,evaluation_context_id)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s)""",
+                   (session_id,tenant_id,subject_id,application_id,agent_id,release_id,evaluation_context_id,retention_policy)
+                   VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
                 (
                     session_id,
                     actor.tenant_id,
@@ -221,6 +227,7 @@ class PostgresRuntimeStore:
                     request.agent_id,
                     release_id,
                     request.evaluation_context_id,
+                    Jsonb(self.retention_policy.model_dump(mode="json")),
                 ),
             )
             await self._audit(conn, actor, "session.created", session_id)
@@ -231,11 +238,17 @@ class PostgresRuntimeStore:
     ) -> Row:
         row = await self._one(
             conn,
-            """SELECT * FROM harness.sessions WHERE session_id=%s
+            """SELECT *,clock_timestamp() AS retention_now FROM harness.sessions WHERE session_id=%s
                AND tenant_id=%s AND subject_id=%s AND application_id=%s"""
             + (" FOR UPDATE" if lock else ""),
             (session_id, actor.tenant_id, actor.subject_id, actor.application_id),
         )
+        if row.get("revoked_at") is not None or row.get("purged_at") is not None:
+            raise RuntimeFault("SESSION_REVOKED", 403)
+        if row.get("created_at") is not None and row["active_run_id"] is None:
+            policy = RetentionPolicy.model_validate(row["retention_policy"])
+            if row["retention_now"] >= row["created_at"] + timedelta(seconds=policy.session_seconds):
+                raise RuntimeFault("SESSION_EXPIRED", 410)
         if row["evaluation_context_id"]:
             await self._evaluation(conn, actor, row["evaluation_context_id"])
         else:
@@ -426,6 +439,14 @@ class PostgresRuntimeStore:
             ).fetchall()
             return [RuntimeEvent.model_validate(item).model_dump(mode="json") for item in events]
 
+    async def validate_event_cursor(self, actor: Principal, run_id: str, after: int) -> None:
+        """逐条公开前重查清理水位；已加载批次不能跨越新event_floor继续回放。"""
+        async with self._transaction() as conn:
+            row, session = await self._authorized_run(conn, actor, run_id)
+            await self._authorize_public_resource(conn, actor, row, session)
+            if after < row["event_floor"]:
+                raise RuntimeFault("EVENT_CURSOR_EXPIRED", 410)
+
     async def register_worker(self, identity: str) -> None:
         async with self._transaction() as conn:
             row = await (
@@ -486,6 +507,31 @@ class PostgresRuntimeStore:
         if row["owner_id"] != identity:
             raise RuntimeFault("EXECUTION_OWNER_MISMATCH")
         return session, row
+
+    async def _claim_history(self, conn: Connection, actor: Principal, session: Row,
+                              manifest: ReleaseManifest) -> list[Row]:
+        if session.get("revoked_at") is not None or session.get("purged_at") is not None:
+            raise RuntimeFault("SESSION_REVOKED", 403)
+        require_memory_boundary(manifest)
+        configuration = manifest.profiles.as_object().get("context")
+        if configuration is None:
+            return await (await conn.execute(
+                "SELECT messages FROM harness.turns WHERE session_id=%s ORDER BY revision", (session["session_id"],))).fetchall()
+        profile = ContextProfile.model_validate(configuration)
+        if profile.history_mode == "current_only":
+            return []
+        history = await (await conn.execute("""SELECT t.run_id,t.revision,t.messages FROM harness.turns t
+            JOIN harness.runs r USING(run_id) JOIN harness.commits c USING(run_id)
+            WHERE t.session_id=%s AND r.status='succeeded' ORDER BY t.revision LIMIT %s""",
+            (session["session_id"], profile.max_history_turns + 1))).fetchall()
+        if len(history) > profile.max_history_turns:
+            raise RuntimeFault("CONTEXT_HISTORY_LIMIT", 429)
+        if len(history) != session["revision"] or any(turn["revision"] != i + 1 for i, turn in enumerate(history)):
+            raise RuntimeFault("CONTEXT_HISTORY_INCOMPLETE", 409)
+        for turn in history:
+            source, source_session = await self._authorized_run(conn, actor, turn["run_id"])
+            await self._authorize_public_resource(conn, actor, source, source_session)
+        return history
 
     async def claim(self, identity: str) -> ClaimedRun | None:
         async with self._transaction() as conn:
@@ -559,12 +605,17 @@ class PostgresRuntimeStore:
                 ),
                 (row["run_id"], identity),
             )
-            history = await (
-                await conn.execute(
-                    "SELECT messages FROM harness.turns WHERE session_id=%s ORDER BY revision",
-                    (session["session_id"],),
-                )
-            ).fetchall()
+            try:
+                history = await self._claim_history(conn, actor, session, manifest)
+            except RuntimeFault as exc:
+                if exc.status >= 500:
+                    raise
+                # 未执行图即可安全收尾；任务级历史拒绝不应使单Worker退出。
+                claimed = await self._one(conn, "SELECT *,clock_timestamp() AS now FROM harness.runs WHERE run_id=%s", (row["run_id"],))
+                await self._terminate(conn, claimed, "failed", exc.code)
+                await conn.execute("UPDATE harness.worker_registration SET active_run_id=NULL,state='idle' WHERE singleton AND identity=%s",
+                                   (identity,))
+                return None
             return ClaimedRun(
                 run_id=row["run_id"],
                 session_id=session["session_id"],
@@ -596,6 +647,8 @@ class PostgresRuntimeStore:
         async with self._transaction() as conn:
             session, row = await self._lock_owned_run(conn, identity, run_id)
             if row["status"] != "running" or row["recovery_required"]:
+                return False
+            if session.get("revoked_at") is not None or session.get("purged_at") is not None:
                 return False
             if session["evaluation_context_id"]:
                 try:
@@ -630,6 +683,8 @@ class PostgresRuntimeStore:
             raise RuntimeFault("COMPLETION_OUTCOME_MISMATCH")
         async with self._transaction() as conn:
             session, row = await self._lock_owned_run(conn, identity, run.run_id)
+            if session.get("revoked_at") is not None or session.get("purged_at") is not None:
+                raise RuntimeFault("SESSION_REVOKED", 403)
             if row["status"] == "succeeded":
                 existing = await self._one(
                     conn,
@@ -687,6 +742,12 @@ class PostgresRuntimeStore:
                 ),
                 (commit_id, run.run_id, digest, Jsonb(report.model_dump(mode="json"))),
             )
+            summary_configuration = run.manifest.profiles.as_object().get("summary_commit")
+            if summary_configuration is not None:
+                summary_policy = SummaryCommitProfile.model_validate(summary_configuration)
+                if self.summary_authority is None or self.summary_authority_ref != summary_policy.version:
+                    raise RuntimeFault("SUMMARY_COMMITTER_NOT_INSTALLED", 503)
+                await self.summary_authority(conn, identity, run, candidate, commit_id)
             # 当前传输完整回答后再公开一个 delta，不伪装成供应商逐 Token 流。
             await self._event(
                 conn,
@@ -811,7 +872,7 @@ class PostgresRuntimeStore:
             ).fetchone()
             return {
                 "database": True,
-                "schema": schema["version"] == 4,
+                "schema": schema["version"] == 9,
                 "worker_registered": worker is not None,
                 "worker_fresh": bool(
                     worker and worker["fresh"] and worker["state"] in {"idle", "running"}

@@ -20,6 +20,8 @@ class ToolExecutor(Protocol):
 
 
 class ArtifactReader(Protocol):
+    """M0同步探针端口；正式M4异步分页使用contracts.artifacts的v2页契约。"""
+
     def read(
         self,
         ref: str,

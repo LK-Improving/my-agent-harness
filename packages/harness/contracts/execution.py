@@ -4,6 +4,7 @@ from typing import Literal, Protocol
 
 from pydantic import Field
 
+from harness.contracts.context import ModelCallPurpose
 from harness.contracts.models import ModelResult, PreparedModelRequest, ResolvedModelRoute
 from harness.contracts.release import BudgetProfile
 from harness.contracts.runtime import AnswerCandidate, ClaimedRun, Principal
@@ -49,6 +50,14 @@ class TerminationProof(Contract):
 
 
 class ExecutionLedger(Protocol):
+    async def authorize_model_purpose(self, run: ClaimedRun, owner: str, messages: JsonSnapshot,
+                                      purpose: ModelCallPurpose) -> None: ...
+
+    async def reserve_purpose_model(
+        self, run: ClaimedRun, owner: str, messages: JsonSnapshot, tools: JsonSnapshot,
+        profile: ExecutionProfile, purpose: ModelCallPurpose,
+    ) -> ModelReservation: ...
+
     async def reserve_model(
         self,
         run: ClaimedRun,

@@ -13,6 +13,8 @@ from harness.adapters.postgres.events import PostgresEventJournal
 from harness.adapters.postgres.lifecycle import PostgresRunLifecycle
 from harness.adapters.writes_postgres import PostgresWriteStore
 from harness.context.requests import envelope_tokens
+from harness.context.boundary import require_context_capacity, require_memory_boundary
+from harness.contracts.context import ModelCallPurpose
 from harness.contracts.execution import (
     ExecutionProfile,
     ModelReservation,
@@ -269,10 +271,31 @@ class PostgresExecutionStore(PostgresWriteStore):
         tools: JsonSnapshot,
         profile: ExecutionProfile,
     ) -> ModelReservation:
+        return await self._reserve_model(run, owner, messages, tools, profile)
+
+    async def reserve_purpose_model(self, run: ClaimedRun, owner: str, messages: JsonSnapshot,
+                                     tools: JsonSnapshot, profile: ExecutionProfile,
+                                     purpose: ModelCallPurpose) -> ModelReservation:
+        if tools.as_object_array():
+            raise RuntimeFault("CONTEXT_SUMMARY_TOOLS_FORBIDDEN", 403)
+        return await self._reserve_model(run, owner, messages, tools, profile, purpose=purpose)
+
+    async def authorize_model_purpose(self, run: ClaimedRun, owner: str, messages: JsonSnapshot,
+                                      purpose: ModelCallPurpose) -> None:
+        from harness.adapters.context_postgres import PostgresContextSource
+
+        async with self._transaction() as conn:
+            await PostgresContextSource(self).verify_summary(conn, run, owner, messages, purpose)
+
+    async def _reserve_model(self, run: ClaimedRun, owner: str, messages: JsonSnapshot,
+                             tools: JsonSnapshot, profile: ExecutionProfile,
+                             *, purpose: ModelCallPurpose | None = None) -> ModelReservation:
+        require_memory_boundary(run.manifest)
         parameters = ModelParameters()
         input_hash = model_input_hash(
             profile.route, messages, tools, parameters, profile.budget.max_output_tokens
         )
+        accounting_hash = canonical_hash({"purpose": purpose.model_dump(mode="json"), "input_hash": input_hash}) if purpose else input_hash
         async with self._transaction() as conn:
             session, row = await self._lock_owned_run(conn, owner, run.run_id)
             await self._check_execution(conn, run.principal, owner, row, session)
@@ -282,10 +305,18 @@ class PostgresExecutionStore(PostgresWriteStore):
                 mode="json"
             ):
                 raise RuntimeFault("MODEL_PROFILE_MANIFEST_MISMATCH")
+            if purpose is not None:
+                from harness.adapters.context_postgres import PostgresContextSource
+
+                await PostgresContextSource(self).verify_summary(conn, run, owner, messages, purpose)
+                bound = await (await conn.execute("SELECT input_hash FROM harness.model_calls WHERE run_id=%s AND purpose_ref=%s",
+                                                  (run.run_id, purpose.fingerprint()))).fetchone()
+                if bound and bound["input_hash"] != accounting_hash:
+                    raise RuntimeFault("MODEL_PURPOSE_INPUT_CHANGED", 409)
             old = await (
                 await conn.execute(
                     "SELECT * FROM harness.model_calls WHERE run_id=%s AND input_hash=%s",
-                    (run.run_id, input_hash),
+                    (run.run_id, accounting_hash),
                 )
             ).fetchone()
             if old:
@@ -298,6 +329,10 @@ class PostgresExecutionStore(PostgresWriteStore):
                 ) > request.max_output_tokens:
                     raise RuntimeFault("MODEL_USAGE_BOUND_EXCEEDED", 429)
                 return ModelReservation(request=request, result=result)
+            if purpose is not None:
+                used = await self._one(conn, "SELECT count(*) AS n FROM harness.model_calls WHERE run_id=%s AND purpose='context_summary'", (run.run_id,))
+                if used["n"] >= 1:
+                    raise RuntimeFault("CONTEXT_SUMMARY_OPERATION_LIMIT", 429)
             draft = await (
                 await conn.execute(
                     "SELECT 1 FROM harness.answer_drafts WHERE run_id=%s", (run.run_id,)
@@ -313,9 +348,9 @@ class PostgresExecutionStore(PostgresWriteStore):
                 parameters,
             )
             remaining = profile.budget.max_total_tokens - row["model_reserved_tokens"]
+            require_context_capacity(count, profile)
             if (
-                count > profile.budget.max_input_tokens
-                or count + profile.budget.max_output_tokens > remaining
+                count + profile.budget.max_output_tokens > remaining
                 or row["model_steps"] >= run.manifest.spec.execution_limits.max_model_steps
             ):
                 raise RuntimeFault("MODEL_BUDGET_EXHAUSTED", 429)
@@ -358,11 +393,15 @@ class PostgresExecutionStore(PostgresWriteStore):
                 (
                     request.model_call_id,
                     run.run_id,
-                    input_hash,
+                    accounting_hash,
                     request.fingerprint(),
                     Jsonb(request.model_dump(mode="json")),
                 ),
             )
+            if purpose is not None:
+                await conn.execute("UPDATE harness.model_calls SET purpose='context_summary',purpose_ref=%s,purpose_binding=%s WHERE model_call_id=%s",
+                                   (purpose.fingerprint(), Jsonb(purpose.model_dump(mode="json")), request.model_call_id))
+                await self._audit(conn, run.principal, "model.context_summary_reserved", purpose.fingerprint())
             await conn.execute(
                 (
                     "UPDATE harness.runs SET "
@@ -595,6 +634,8 @@ class PostgresExecutionStore(PostgresWriteStore):
             if self.answer_authority is not None:
                 await self.answer_authority(conn, owner, run, candidate)
             prepared = PreparedModelRequest.model_validate(call["request"])
+            if call.get("purpose", "answer") != "answer":
+                raise RuntimeFault("SUMMARY_CANNOT_PUBLISH_ANSWER", 403)
             if (
                 call["state"] != "succeeded"
                 or candidate.model_attempt_id != prepared.model_attempt_id
