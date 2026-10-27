@@ -1,0 +1,26 @@
+{
+  "profiles": [
+    {
+      "ref": "hybrid-bounded@1",
+      "recall_limit": 12,
+      "fusion_limit": 12,
+      "top_n": 5,
+      "rrf_k": 60,
+      "query_characters": 1000,
+      "rerank_characters": 4000,
+      "evidence_characters": 4000,
+      "timeout_seconds": 60,
+      "branch_timeout_seconds": 15,
+      "model_limits": {"ref": "query-model-bounded@1", "max_calls": 2, "max_input_bytes": 16384}
+    }
+  ],
+  "snapshots": [
+    {
+      "knowledge_base_id": "example-kb",
+      "snapshot_id": "snapshot-REPLACE_WITH_PUBLISHED_ID",
+      "snapshot_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "generation_id": "00000000000000000000000000000000",
+      "index_binding_hash": "0000000000000000000000000000000000000000000000000000000000000000"
+    }
+  ]
+}

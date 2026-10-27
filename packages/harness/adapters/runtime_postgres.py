@@ -1,7 +1,7 @@
 """M1 PostgreSQL 业务事务；连接异常绝不触发执行权转移。"""
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from typing import Any
@@ -32,6 +32,9 @@ from harness.contracts.snapshots import JsonSnapshot
 
 
 class PostgresRuntimeStore:
+    answer_authority: Callable[[Connection, str, ClaimedRun, AnswerCandidate], Awaitable[None]] | None = None
+    resource_authority: Callable[[Connection, Principal, Row, Row], Awaitable[None]] | None = None
+    resource_authority_ref: str | None = None
     # None仅供旧独立调用方；实际组合根始终设置冻结的已安装manifest集合。
     installed_manifest_hashes: frozenset[str] | None = None
 
@@ -260,6 +263,7 @@ class PostgresRuntimeStore:
             if existing:
                 if existing["request_hash"] != request.business_hash():
                     raise RuntimeFault("REQUEST_ID_CONFLICT")
+                await self._authorize_public_resource(conn, actor, existing, session)
                 return self._view(existing, session)
             ready = getattr(self, "new_run_ready", None)
             if ready is not None and not await asyncio.to_thread(ready):
@@ -357,9 +361,23 @@ class PostgresRuntimeStore:
             raise RuntimeFault("RESOURCE_SCOPE_REVOKED", 403)
         return row, session
 
+    async def _authorize_public_resource(self, conn: Connection, actor: Principal, row: Row, session: Row) -> None:
+        release = await self._one(conn, "SELECT manifest FROM harness.releases WHERE tenant_id=%s "
+                                  "AND application_id=%s AND release_id=%s",
+                                  (actor.tenant_id, actor.application_id, session["release_id"]))
+        manifest = ReleaseManifest.model_validate(release["manifest"])
+        if manifest.content_hash() != row["manifest_hash"]:
+            raise RuntimeFault("STORED_MANIFEST_MISMATCH", 409)
+        required = manifest.profiles.as_object().get("resource_authority_ref")
+        if required is not None:
+            if self.resource_authority is None or self.resource_authority_ref != required:
+                raise RuntimeFault("RESOURCE_AUTHORITY_UNAVAILABLE", 503)
+            await self.resource_authority(conn, actor, row, session)
+
     async def get_run(self, actor: Principal, run_id: str) -> RunView:
         async with self._transaction() as conn:
             row, session = await self._authorized_run(conn, actor, run_id)
+            await self._authorize_public_resource(conn, actor, row, session)
             return self._view(row, session)
 
     async def cancel_run(self, actor: Principal, run_id: str, request: CancelRequest) -> RunView:
@@ -373,11 +391,11 @@ class PostgresRuntimeStore:
                 )
             ).fetchone()
             if old:
-                return self._view(row, session)
+                return self._view(row, session).model_copy(update={"result": None})
             if row["revision"] != request.expected_run_revision:
                 raise RuntimeFault("RUN_REVISION_CONFLICT")
             if row["status"] not in {"queued", "running", "waiting_approval", "reconciling"}:
-                return self._view(row, session)
+                return self._view(row, session).model_copy(update={"result": None})
             await conn.execute(
                 "INSERT INTO harness.cancel_requests VALUES(%s,%s)", (run_id, request.request_id)
             )
@@ -389,11 +407,13 @@ class PostgresRuntimeStore:
             if row["status"] in {"queued", "waiting_approval", "reconciling"}:
                 await self._terminate(conn, row, "cancelled", "CANCELLED")
             updated = await self._one(conn, "SELECT * FROM harness.runs WHERE run_id=%s", (run_id,))
-            return self._view(updated, session)
+            # 取消保留可用性，但不能成为撤权后读取旧答案的旁路。
+            return self._view(updated, session).model_copy(update={"result": None})
 
     async def events(self, actor: Principal, run_id: str, after: int) -> list[dict[str, Any]]:
         async with self._transaction() as conn:
-            row, _ = await self._authorized_run(conn, actor, run_id)
+            row, session = await self._authorized_run(conn, actor, run_id)
+            await self._authorize_public_resource(conn, actor, row, session)
             if after < row["event_floor"]:
                 raise RuntimeFault("EVENT_CURSOR_EXPIRED", 410)
             if after > row["event_seq"]:
@@ -650,6 +670,8 @@ class PostgresRuntimeStore:
                     "CANCELLED" if row["cancel_requested"] else "EXECUTION_EXPIRED",
                 )
                 return
+            if self.answer_authority is not None:
+                await self.answer_authority(conn, identity, run, candidate)
             commit_id = uuid4().hex
             result = {
                 "answer": candidate.answer,

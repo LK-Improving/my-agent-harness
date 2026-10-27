@@ -1,0 +1,33 @@
+{
+  "version": "m3-acceptance-handoff@1",
+  "status": "defined_not_run",
+  "scope": "formal-rag-and-core-compatibility",
+  "sources": [
+    {"role": "corpus", "path": "evals/m0/corpus.jsonl", "sha256_bytes": "ace6a0295e19b38af2f80b5c14ae0d0663251ef6b18abeca0b8c96df01139ce9"},
+    {"role": "development", "path": "evals/m0/queries.jsonl", "sha256_bytes": "214f8a0d5277999bdde221c2b9f249e3ca7a0d8c61b287e5f0502a6157dbbd99"},
+    {"role": "holdout", "path": "evals/m0/holdout.jsonl", "sha256_bytes": "442cc5e0b2e77d425787edd54a87695d4d6f4ec4f52616bf524584843ae959fa"},
+    {"role": "operations", "path": "evals/m0/operations-cases.jsonl", "sha256_bytes": "1884a5bcee092397fba45c75ad0fa9a80f8026ce2da930c1c8363d0a2c65e889"},
+    {"role": "probe_policy", "path": "evals/m0/retrieval-live-policy.json", "sha256_bytes": "3322d3ec302fa336ecaff1b59a85f5e212d5ef06b76124e7e13a3d29c7a97bc3"}
+  ],
+  "answer_expectations": "evals/m3/answer-expectations.jsonl",
+  "scenarios": "evals/m3/scenarios.jsonl",
+  "dialogues": "evals/m3/dialogues.jsonl",
+  "gate_policy": "evals/m3/gate-policy.json",
+  "required_tasks": ["M3-07", "M3-01", "M3-02", "M3-03", "M3-04", "M3-06"],
+  "required_scenario_ids": ["M3S01", "M3S02", "M3S03", "M3S04", "M3S05", "M3S06", "M3S07", "M3S08", "M3S09", "M3S10", "M3S11", "M3S12", "M3S13", "M3S14", "M3S15", "M3S16", "M3S17", "M3S18", "M3S19", "M3S20", "M3S21", "M3S22", "M3S23", "M3S24", "M3S25", "M3S26", "M3S27", "M3S28", "M3S29", "M3S30"],
+  "execution": {
+    "automatic_run": false,
+    "acceptance_runner_implemented": false,
+    "observed_manifest_required": true,
+    "actual_api_sse_required": true,
+    "holdout_may_be_used_for_tuning": false,
+    "repeat_m0_feasibility_probe": false,
+    "skip_or_missing_is_pass": false
+  },
+  "identity_mapping": {
+    "client_scope_fields_are_authoritative": false,
+    "actor_aliases": ["tenant-a-reader", "tenant-b-reader", "knowledge-manager"],
+    "server_owned_mapping_required": ["principal", "knowledge_base_id", "document_id", "version_id", "chunk_id", "body_hash", "snapshot_id", "generation_id"],
+    "note": "c01等是固定样本别名；须通过正式入库和发布取得真实ID/hash，不能把别名伪装成实际PG证据。s0/s1为测试快照别名，不是部署pin。"
+  }
+}

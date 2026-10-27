@@ -1,0 +1,28 @@
+{
+  "version": "m3-gates-draft@1",
+  "status": "draft_not_executed",
+  "outcomes": ["not_run", "incomplete", "failed", "passed"],
+  "zero_tolerance_counts": ["unauthorized_body_delivery", "invalid_version_citations", "achieved_without_current_evidence", "unexpected_business_writes", "unapproved_scope_changes", "manifest_mismatches", "budget_resets_or_overruns", "credential_disclosures", "revocation_reversed_by_cleanup"],
+  "completeness_requirements": ["all_required_scenarios_observed", "all_16_source_queries_reported", "development_and_holdout_separated", "all_required_dependencies_real_for_claimed_layer", "actual_api_and_persisted_sse_observed", "candidate_and_observed_manifest_match", "dataset_and_policy_hashes_recorded", "required_judge_succeeded", "unverified_items_reported", "cost_coverage_reported_without_unknown_as_zero"],
+  "answer_judge": {
+    "required_for_quality_claim": true,
+    "implementation": null,
+    "prompt_ref": null,
+    "model_binding_ref": null,
+    "dimensions": ["authorized_evidence_entailment", "version_citation_correctness", "no_evidence_decision", "degradation_disclosure", "instruction_in_evidence_is_data"],
+    "missing_or_failed_outcome": "incomplete"
+  },
+  "retrieval_metrics": {
+    "k": 5,
+    "report": ["recall_at_k", "mrr_at_k", "ndcg_at_k", "precision_at_k"],
+    "layers": ["dense", "bm25", "rrf", "rerank"],
+    "positive_label_sources": ["evals/m0/queries.jsonl", "evals/m0/holdout.jsonl"],
+    "empty_relevance_labels_are_excluded_from_positive_denominators": true,
+    "negative_cases_require_separate_answer_and_isolation_evidence": true,
+    "inherited_small_fixture_policy": "evals/m0/retrieval-live-policy.json",
+    "formal_business_quality_thresholds": null,
+    "missing_formal_thresholds_outcome": "incomplete"
+  },
+  "decision_order": ["not_run_when_no_execution", "failed_when_any_observed_hard_violation", "incomplete_when_required_evidence_or_judge_or_thresholds_missing", "passed_only_when_all_required_gates_have_actual_evidence"],
+  "note": "这是交接定义，不是已实现的M5评测器。M0小样本门限及既有结果保持原范围；本批不运行、不重新调参或补造生产质量阈值。blocked清理若符合预期保护，不能记成已物理删除。"
+}

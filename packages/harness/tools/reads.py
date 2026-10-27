@@ -4,7 +4,9 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Literal
+
+import anyio
 
 from pydantic import BaseModel
 
@@ -26,6 +28,9 @@ class RegisteredRead:
     output_type: type[BaseModel]
     handler: Callable[[Principal, dict[str, Any]], Awaitable[Any]]
     authorize: Callable[[Principal, dict[str, Any]], bool]
+    contextual_handler: Callable[[ClaimedRun, str, str, dict[str, Any]], Awaitable[Any]] | None = None
+    revalidate: Callable[[ClaimedRun, str, ToolReceipt], Awaitable[None]] | None = None
+    accounting_ref: Literal["child-model-ledger@1"] | None = None
 
 
 class ReadCoordinator:
@@ -48,10 +53,11 @@ class ReadCoordinator:
             spec = ToolSpec.model_validate(item.spec.as_object())
             if (
                 spec.effect not in {"read", "pure"}
-                or spec.cost.billable
+                or (spec.cost.billable and (item.accounting_ref != "child-model-ledger@1"
+                    or item.contextual_handler is None or item.revalidate is None))
                 or spec.retry.max_attempts_per_operation != 1
             ):
-                raise ValueError("首版只读包装仅支持免费单次尝试")
+                raise ValueError("只读包装要求单次尝试；计费子能力必须提供上下文与持久回执复查")
             if canonical_hash(spec.input_schema) != canonical_hash(
                 item.input_type.model_json_schema()
             ) or canonical_hash(spec.output_schema) != canonical_hash(
@@ -118,18 +124,26 @@ class ReadCoordinator:
             run, owner, logical_id, entry.spec, guarded.arguments
         )
         if reservation.receipt:
+            if entry.revalidate is not None:
+                await entry.revalidate(run, owner, reservation.receipt)
             await self.after_receipt(run, reservation.receipt)
             return reservation.receipt
         try:
             async with asyncio.timeout(spec.timeout_ms / 1000):
-                result = JsonSnapshot.capture(await entry.handler(run.principal, args))
+                value = (await entry.contextual_handler(run, owner, logical_id, args)
+                         if entry.contextual_handler is not None else await entry.handler(run.principal, args))
+                result = JsonSnapshot.capture(value)
             if len(result.canonical_text.encode("utf-8")) > 1048576:
                 raise RuntimeFault("TOOL_RESULT_TOO_LARGE", 422)
-            entry.output_type.model_validate(result.materialize(), strict=True)
+            entry.output_type.model_validate_json(result.canonical_text, strict=True)
         except BaseException:
-            await self.ledger.save_read(reservation, None, "READ_FAILED")
+            with anyio.CancelScope(shield=True):
+                async with asyncio.timeout(5):
+                    await self.ledger.save_read(reservation, None, "READ_FAILED")
             raise
         receipt = await self.ledger.save_read(reservation, result, None)
+        if entry.revalidate is not None:
+            await entry.revalidate(run, owner, receipt)
         await self.after_receipt(run, receipt)
         return receipt
 

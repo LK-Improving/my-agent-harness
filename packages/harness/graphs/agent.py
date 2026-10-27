@@ -43,6 +43,7 @@ class FinalEnvelope(Contract):
     answer: str = Field(min_length=1, max_length=64000)
     answer_kind: Literal["answer", "clarification", "abstention"]
     task_outcome: Literal["achieved", "needs_input", "not_achieved"]
+    evidence_refs: tuple[str, ...] = Field(default=(), max_length=40)
 
 
 class AgentEngine:
@@ -61,6 +62,8 @@ class AgentEngine:
         extensions: ExtensionChain | None = None,
         *,
         release_guard: Callable[[ReleaseManifest], None] | None = None,
+        prepare_context: Callable[[ClaimedRun, str], Awaitable[list[Any]]] | None = None,
+        authorize_context: Callable[[ClaimedRun, str], Awaitable[None]] | None = None,
     ) -> None:
         self.ledger, self.gateway, self.reads, self.writes = ledger, gateway, reads, writes
         self.checkpointer, self.owner, self.validate = (
@@ -76,6 +79,7 @@ class AgentEngine:
         )
         self.prompts = MappingProxyType(dict(prompts))
         self.release_guard = release_guard
+        self.prepare_context, self.authorize_context = prepare_context, authorize_context
 
     def observed_manifest_hash(self, release: Any) -> str:
         installed = self.releases.require(release)
@@ -115,6 +119,8 @@ class AgentEngine:
         self.observed_manifest_hash(run.manifest)
 
         async def model(messages: JsonSnapshot, tools: JsonSnapshot) -> Any:
+            if self.authorize_context is not None:
+                await self.authorize_context(run, self.owner)
             return await self.gateway.complete(run, self.owner, messages, tools)
 
         async def forbidden(**kwargs: Any) -> str:
@@ -282,6 +288,8 @@ class AgentEngine:
         candidate = await self.ledger.candidate_for_run(run.principal, run.run_id)
         if candidate is not None:
             return await self.validated_candidate(run, candidate)
+        prepared_context = (await self.prepare_context(run, self.owner)
+                            if self.prepare_context is not None else [])
         graph, config = self.graph(run), self.config(run)
         state = await graph.aget_state(config)
         if state.values:
@@ -324,7 +332,7 @@ class AgentEngine:
             value = None
         else:
             value = {
-                "messages": initial_context(run.history, run.request.message),
+                "messages": prepared_context if self.prepare_context is not None else initial_context(run.history, run.request.message),
                 "harness_run_id": run.run_id,
                 "harness_manifest_hash": run.manifest.content_hash(),
             }
@@ -346,7 +354,7 @@ class AgentEngine:
             answer=envelope.answer,
             answer_kind=envelope.answer_kind,
             task_outcome=envelope.task_outcome,
-            task=TaskState(objective=run.request.message, source_turn_id=run.run_id),
+            task=TaskState(objective=run.request.message, source_turn_id=run.run_id, evidence_refs=envelope.evidence_refs),
             validation=ValidationReport(
                 validator_ref=run.manifest.spec.completion_validator_ref,
                 input_hash="0" * 64,

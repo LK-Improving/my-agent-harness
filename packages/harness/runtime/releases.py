@@ -19,6 +19,7 @@ def build_development_release(
     model_profile: JsonSnapshot,
     profiles: JsonSnapshot,
     environment_hash: str,
+    release_prefix: str = "operations-development",
 ) -> ReleaseManifest:
     # 完整候选内容参与身份；不把调用方给的旧 release_id 当作新构建身份。
     candidate = ReleaseManifest(
@@ -32,7 +33,7 @@ def build_development_release(
         profiles=profiles,
         environment_profile_hash=environment_hash,
     )
-    release_id = "operations-development-" + candidate.content_hash()[:24]
+    release_id = release_prefix + "-" + candidate.content_hash()[:24]
     return ReleaseManifest.model_validate(
         {
             **candidate.model_dump(mode="python"),

@@ -1,0 +1,12 @@
+{
+  "staging_directory": ".runtime/ingestion/staging",
+  "source_directory": ".runtime/ingestion/sources",
+  "profile": {
+    "version": "text-ingestion@1",
+    "max_upload_bytes": 10485760,
+    "max_characters": 1000000,
+    "chunk_characters": 1600,
+    "max_chunks": 1000,
+    "parse_timeout_seconds": 60
+  }
+}

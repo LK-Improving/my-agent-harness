@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from dotenv import dotenv_values
 from fastapi import FastAPI
@@ -14,6 +15,8 @@ from harness.contracts.specs import Contract
 
 
 class ServerSettings(Contract):
+    agent_profile: Literal["operations", "travel"] = "operations"
+    rag_enabled: bool = False
     database_dsn: SecretStr
     environment: str = "development"
     auth_mode: str = "development"
@@ -37,7 +40,12 @@ def load_server_settings(root: Path) -> ServerSettings:
         admission = AdmissionProfile.model_validate_json(
             (root / profile).read_text(encoding="utf-8")
         )
+    selected = values.get("HARNESS_AGENT_PROFILE", "operations")
+    if selected not in {"operations", "travel"}:
+        raise ValueError("HARNESS_AGENT_PROFILE仅支持operations或travel")
     return ServerSettings(
+        agent_profile="travel" if selected == "travel" else "operations",
+        rag_enabled=values.get("HARNESS_RAG_ENABLED", "false").lower() == "true",
         database_dsn=SecretStr(dsn),
         environment=values.get("HARNESS_ENVIRONMENT", "development"),
         auth_mode=values.get("HARNESS_AUTH_MODE", "development"),

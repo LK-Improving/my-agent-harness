@@ -3,8 +3,8 @@
   "graph_template": "rag_chat", "graph_version": "rag-chat-v1",
   "prompt_ref": "travel/system@1", "model_profile_ref": "qwen-answer-model@1",
   "knowledge_bindings": [
-    {"knowledge_base_id": "synthetic-travel", "snapshot_id": "snapshot-m0",
-     "retrieval_profile_ref": "hybrid-test@1"}
+    {"knowledge_base_id": "example-kb", "snapshot_id": "snapshot-REPLACE_WITH_PUBLISHED_ID",
+     "retrieval_profile_ref": "hybrid-bounded@1"}
   ],
   "allowed_tools": [{"name": "retrieve_knowledge", "version": "1", "max_operations_per_run": 1}],
   "policy_profile_ref": "knowledge-read-only@1", "budget_profile_ref": "bounded-estimate-standard@1",

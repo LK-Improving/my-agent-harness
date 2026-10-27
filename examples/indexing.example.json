@@ -1,0 +1,23 @@
+{
+  "milvus_uri": "http://127.0.0.1:19531",
+  "database": "default",
+  "credential_profile_ref": "milvus-local@1",
+  "token_env_var": "HARNESS_MILVUS_TOKEN",
+  "environment_profile_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "rpc_timeout_seconds": 20,
+  "profile": {
+    "version": "milvus-dual@1",
+    "dimensions": 1024,
+    "dense_index": "FLAT",
+    "dense_metric": "COSINE",
+    "sparse_index": "SPARSE_INVERTED_INDEX",
+    "sparse_metric": "BM25",
+    "tokenizer": "jieba",
+    "consistency": "Strong",
+    "protocol": "milvus-single-rpc@1",
+    "sdk_version": "2.6.17",
+    "max_chunks": 1000,
+    "max_characters": 1000000,
+    "build_timeout_seconds": 900
+  }
+}

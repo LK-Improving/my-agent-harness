@@ -1,7 +1,7 @@
 """统一模型包装；持久派发意图优先，不自动重试未知计费尝试。"""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 
 from harness.context.projection import project_model_messages
@@ -23,10 +23,12 @@ class GovernedModelGateway:
         extensions: ExtensionChain | None = None,
         *,
         release_guard: Callable[[ReleaseManifest], None] | None = None,
+        context_authority: Callable[[ClaimedRun, str], Awaitable[None]] | None = None,
     ) -> None:
         self.ledger, self.transport, self.profile = ledger, transport, profile
         self.extensions = extensions or ExtensionChain()
         self.release_guard = release_guard
+        self.context_authority = context_authority
 
     async def complete(
         self, run: ClaimedRun, owner: str, messages: JsonSnapshot, tools: JsonSnapshot
@@ -48,6 +50,8 @@ class GovernedModelGateway:
         messages = project_model_messages(
             JsonSnapshot.capture(transformed.as_object()["messages"]).as_object_array()
         )
+        if self.context_authority is not None:
+            await self.context_authority(run, owner)
         reservation = await self.ledger.reserve_model(run, owner, messages, tools, self.profile)
         if reservation.result is not None:
             result = reservation.result.model_copy(
@@ -70,6 +74,8 @@ class GovernedModelGateway:
                     }
                 ),
             )
+            if self.context_authority is not None:
+                await self.context_authority(run, owner)
         except BaseException:
             # 尚未调用传输；关键扩展/取消阻断不能伪造成未知计费请求。
             await self.ledger.fail_model(

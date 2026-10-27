@@ -32,6 +32,7 @@ async def serve(root: Path, release_manifest: str | None = None) -> None:
     if not assembly.model_ready:
         raise RuntimeFault("MODEL_CAPABILITY_OR_CREDENTIAL_NOT_READY", 503)
     assembly.assert_compatible(assembly.manifest)
+    await assembly.require_optional_schema()
     async with saver(settings.database_dsn.get_secret_value()) as checkpoint:
         assembly.engine.checkpointer = checkpoint
         assembly.store.process_identity = current_process()

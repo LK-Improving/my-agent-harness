@@ -1,5 +1,7 @@
 """唯一开发装配：配置、实际可执行清单与独立manifest，不读取其他项目文件。"""
 
+from __future__ import annotations
+
 import hashlib
 import sys
 import tomllib
@@ -7,7 +9,7 @@ from datetime import UTC, datetime
 from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from domain_tools.operations.completion import WorkOrderCompletionValidator
 from domain_tools.operations.queries import registered_order_query
@@ -25,7 +27,7 @@ from harness.contracts.hashing import canonical_hash
 from harness.contracts.release import ReleaseManifest
 from harness.contracts.runtime import AnswerCandidate, ClaimedRun, RuntimeFault
 from harness.contracts.snapshots import JsonSnapshot
-from harness.contracts.specs import AgentSpec
+from harness.contracts.specs import AgentSpec, KnowledgeBinding
 from harness.contracts.state import ValidationReport
 from harness.graphs.agent import AgentEngine
 from harness.runtime.extensions import ExtensionChain, RegisteredExtension
@@ -33,6 +35,11 @@ from harness.runtime.models import GovernedModelGateway
 from harness.runtime.releases import InstalledReleases, build_development_release
 from harness.tools.reads import ReadCoordinator, RegisteredRead
 from harness.tools.writes import RegisteredWrite, WriteCoordinator, WriteRegistry
+
+if TYPE_CHECKING:
+    from domain_tools.knowledge.completion import KnowledgeCompletionValidator
+    from domain_tools.knowledge.context import KnowledgeContext
+    from harness.bootstrap.retrieval import RetrievalRuntime
 
 
 def file_hash(path: Path) -> str:
@@ -62,6 +69,12 @@ class DevelopmentAssembly:
     ) -> None:
         self.root = root
         self.settings = load_server_settings(root)
+        knowledge = self.settings.agent_profile == "travel"
+        if knowledge and (not self.settings.rag_enabled or self.settings.enable_write_sandbox):
+            raise ValueError("知识profile必须显式启用RAG且不启用运营写沙箱")
+        self._agent_path = f"agents/{self.settings.agent_profile}.json"
+        self._prompt_paths = (f"prompts/{self.settings.agent_profile}/system.txt",
+                              "prompts/knowledge/protocol.txt" if knowledge else "prompts/runtime/protocol.txt")
         self.store = PostgresRecoveryStore(
             self.settings.database_dsn.get_secret_value(), self.settings.admission
         )
@@ -100,7 +113,24 @@ class DevelopmentAssembly:
             except PackageNotFoundError:
                 installed[name] = "not-installed"
         dependencies_match = all(locked.get(name) == actual for name, actual in installed.items())
-        read_entry = registered_order_query()
+        self.retrieval: RetrievalRuntime | None = None
+        self.knowledge_validator: KnowledgeCompletionValidator | None = None
+        self.knowledge_context: KnowledgeContext | None = None
+        task_guard = require_task_target
+        if knowledge:
+            from domain_tools.knowledge.retrieval import registered_knowledge, require_query
+            from harness.bootstrap.retrieval import load_retrieval
+
+            self.retrieval = load_retrieval(root, enabled=True, execution=self.store,
+                                            current_identity=self.store.identity_source.current)
+            if self.retrieval is None:
+                raise RuntimeFault("KNOWLEDGE_RUNTIME_REQUIRED", 503)
+            read_entry = registered_knowledge(self.retrieval.service)
+            task_guard = require_query
+            installed["pymilvus"] = version("pymilvus")
+            dependencies_match = dependencies_match and locked.get("pymilvus") == installed["pymilvus"]
+        else:
+            read_entry = registered_order_query()
         write_entries: tuple[RegisteredWrite, ...] = ()
         if self.settings.enable_write_sandbox:
             from harness.bootstrap.sandbox import load_sandbox_settings
@@ -113,7 +143,7 @@ class DevelopmentAssembly:
 
             read_entry = registered_sandbox_query(write_entries[0].handler)
         self.reads = ReadCoordinator(
-            self.store, (read_entry,), extensions=self.extensions, task_guard=require_task_target
+            self.store, (read_entry,), extensions=self.extensions, task_guard=task_guard
         )
         self.writes = (
             WriteCoordinator(
@@ -129,24 +159,45 @@ class DevelopmentAssembly:
             *self.reads.entries.values(),
             *write_entries,
         ]
-        agent_source = (root / "agents/operations.json").read_bytes()
+        self.store.delegated_read_hashes = frozenset(
+            item.spec.content_hash for item in self.reads.entries.values() if item.accounting_ref is not None
+        )
+        if knowledge:
+            from domain_tools.knowledge.completion import KnowledgeCompletionValidator
+            from domain_tools.knowledge.context import KnowledgeContext
+
+            if self.retrieval is None:
+                raise RuntimeFault("KNOWLEDGE_RUNTIME_REQUIRED", 503)
+            self.knowledge_validator = KnowledgeCompletionValidator(self.store, self.retrieval.service)
+            self.knowledge_context = KnowledgeContext(self.reads, self.knowledge_validator)
+            self.store.answer_authority = self.authorize_answer
+            self.store.resource_authority = self.retrieval.repository.authorize_public_read
+            self.store.resource_authority_ref = "knowledge-read@1"
+        agent_source = (root / self._agent_path).read_bytes()
         self._agent_file_hash = hashlib.sha256(agent_source).hexdigest()
         original = AgentSpec.model_validate_json(agent_source)
         allowed = {item.spec.as_object()["name"]: item for item in entries}
         spec = original.model_copy(
             update={
-                "release_id": "operations-development@1",
-                "graph_version": "create-agent-governed@1",
+                "release_id": "knowledge-development@1" if knowledge else "operations-development@1",
+                "graph_version": "rag-chat-governed@1" if knowledge else "create-agent-governed@1",
                 "allowed_tools": tuple(
                     item for item in original.allowed_tools if item.name in allowed
                 ),
             }
         )
-        prompt = (
-            (root / "prompts/operations/system.txt").read_text("utf-8")
-            + "\n"
-            + (root / "prompts/runtime/protocol.txt").read_text("utf-8")
-        )
+        if knowledge:
+            if self.retrieval is None:
+                raise RuntimeFault("KNOWLEDGE_RUNTIME_REQUIRED", 503)
+            pins = {p.knowledge_base_id: p for p in self.retrieval.release.snapshots}
+            if set(pins) != {b.knowledge_base_id for b in spec.knowledge_bindings}:
+                raise ValueError("Agent知识库与部署pin集合必须完全一致")
+            spec = AgentSpec.model_validate({**spec.model_dump(mode="python"), "knowledge_bindings": tuple(
+                KnowledgeBinding(knowledge_base_id=b.knowledge_base_id, snapshot_id=pins[b.knowledge_base_id].snapshot_id,
+                                  retrieval_profile_ref=b.retrieval_profile_ref) for b in spec.knowledge_bindings)})
+            if any(b.retrieval_profile_ref not in {p.ref for p in self.retrieval.release.profiles} for b in spec.knowledge_bindings):
+                raise ValueError("Agent引用的检索profile未安装")
+        prompt = "\n".join((root / name).read_text("utf-8") for name in self._prompt_paths)
         env = {
             "environment": self.settings.environment,
             "auth_mode": self.settings.auth_mode,
@@ -164,6 +215,9 @@ class DevelopmentAssembly:
         if self.settings.enable_write_sandbox:
             env["sandbox_base_url"] = sandbox.base_url
             env["read_source"] = "write-sandbox"
+        if knowledge:
+            env["read_source"] = "authorized-knowledge@1"
+            env["agent_profile"] = "travel"
         self.model_runtime = load_model_runtime(
             root,
             model_profile_ref=spec.model_profile_ref,
@@ -183,6 +237,10 @@ class DevelopmentAssembly:
         profiles["extensions"] = self.extensions.snapshot.as_object()
         if self.model_runtime.binding_snapshot is not None:
             profiles["model_binding"] = self.model_runtime.binding_snapshot.as_object()
+        if self.retrieval is not None:
+            profiles["retrieval"] = self.retrieval.release.model_dump(mode="json")
+            profiles["resource_authority_ref"] = "knowledge-read@1"
+            profiles["read_accounting"] = {digest: "child-model-ledger@1" for digest in self.store.delegated_read_hashes}
         source = source_hash(root)
         manifest = build_development_release(
             spec=spec,
@@ -196,6 +254,7 @@ class DevelopmentAssembly:
             model_profile=JsonSnapshot.capture(self.profile.route.model_dump(mode="json")),
             profiles=JsonSnapshot.capture(profiles),
             environment_hash=canonical_hash(env),
+            release_prefix="knowledge-development" if knowledge else "operations-development",
         )
         spec = manifest.spec
         self.releases = InstalledReleases((manifest,))
@@ -204,7 +263,7 @@ class DevelopmentAssembly:
         self.store.installed_manifest_hashes = self.releases.hashes
         self._prompt_files = {
             name: file_hash(root / name)
-            for name in ("prompts/operations/system.txt", "prompts/runtime/protocol.txt")
+            for name in self._prompt_paths
         }
         self.manifest = manifest
         self.engine = AgentEngine(
@@ -215,6 +274,7 @@ class DevelopmentAssembly:
                 self.profile,
                 self.extensions,
                 release_guard=self.assert_compatible,
+                context_authority=self.knowledge_context.authorize if self.knowledge_context else None,
             ),
             self.reads,
             self.writes,
@@ -223,9 +283,11 @@ class DevelopmentAssembly:
             {spec.release_id: manifest},
             {spec.release_id: prompt},
             self.validate,
-            require_task_target,
+            task_guard,
             self.extensions,
             release_guard=self.assert_compatible,
+            prepare_context=self.knowledge_context.prepare if self.knowledge_context else None,
+            authorize_context=self.knowledge_context.authorize if self.knowledge_context else None,
         )
 
     def assert_compatible(self, release: ReleaseManifest) -> None:
@@ -234,7 +296,7 @@ class DevelopmentAssembly:
             if (
                 source_hash(self.root) != self.manifest.source_tree_hash
                 or file_hash(self.root / "uv.lock") != self.manifest.dependency_lock_hash
-                or file_hash(self.root / "agents/operations.json") != self._agent_file_hash
+                or file_hash(self.root / self._agent_path) != self._agent_file_hash
                 or any(
                     file_hash(self.root / name) != digest
                     for name, digest in self._prompt_files.items()
@@ -249,6 +311,8 @@ class DevelopmentAssembly:
                 or any(version(name) != actual for name, actual in self._installed_versions.items())
             ):
                 raise RuntimeFault("INSTALLED_RELEASE_DRIFT", 503)
+            if self.retrieval is not None:
+                self.retrieval.configuration_guard()
         except (OSError, ValueError, PackageNotFoundError):
             raise RuntimeFault("INSTALLED_RELEASE_DRIFT", 503) from None
         if not self._dependencies_match or not self.model_runtime.ready():
@@ -263,6 +327,8 @@ class DevelopmentAssembly:
             return False
 
     async def validate(self, run: ClaimedRun, candidate: AnswerCandidate) -> ValidationReport:
+        if self.knowledge_validator is not None:
+            return await self.knowledge_validator.validate(run, self.engine.owner, candidate)
         receipts = await self.store.write_receipts(run.principal, run.run_id)
         if candidate.task_outcome == "achieved" and receipts:
             # 参数来自授权持久回执关联的operation，不接受模型自报订单。
@@ -326,3 +392,26 @@ class DevelopmentAssembly:
             evidence_refs=tuple(item.operation_id for item in reads),
             checked_at=datetime.now(UTC),
         )
+
+    async def authorize_answer(self, conn: Any, owner: str, run: ClaimedRun, candidate: AnswerCandidate) -> None:
+        """答案公开与业务commit事务内复查；只执行本地PG查询和纯完成校验。"""
+        if self.retrieval is None:
+            raise RuntimeFault("KNOWLEDGE_AUTHORITY_NOT_INSTALLED", 503)
+        from domain_tools.knowledge.completion import validate_knowledge
+        from domain_tools.knowledge.retrieval import receipt_output
+        from harness.adapters.postgres.queries import PostgresEvidenceQueries
+
+        receipts = await PostgresEvidenceQueries.read_receipts(conn, run.run_id)
+        outputs = tuple(receipt_output(run, receipt) for receipt in receipts)
+        for output in outputs:
+            for result in output.results:
+                await self.retrieval.repository.authorize_result_in_transaction(conn, run.principal, owner, run.run_id, result)
+        report = validate_knowledge(run, candidate, outputs, receipts)
+        if (report.verdict not in {"pass", "needs_clarification"} or not all(report.checks.values())
+            or report.input_hash != candidate.validation.input_hash or report.checks != candidate.validation.checks
+            or report.evidence_refs != candidate.validation.evidence_refs):
+            raise RuntimeFault("KNOWLEDGE_COMPLETION_AUTHORITY_CHANGED", 403)
+
+    async def require_optional_schema(self) -> None:
+        if self.retrieval is not None:
+            await self.retrieval.repository.require_schema()

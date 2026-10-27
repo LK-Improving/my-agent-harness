@@ -206,7 +206,12 @@ def create_app(
                     await store.renew_sse(current_actor, lease)
                     view = await store.get_run(current_actor, run_id)
                     for event in batch:
+                        # 已加载的同一批事件也逐条复查，撤权后不继续公开缓存正文。
+                        current_actor = await asyncio.to_thread(
+                            authenticate, request.headers.get("authorization")
+                        )
                         await store.renew_sse(current_actor, lease)
+                        await store.get_run(current_actor, run_id)
                         cursor = int(str(event["seq"]))
                         yield (
                             f"id: {cursor}\nevent: {event['type']}\n"

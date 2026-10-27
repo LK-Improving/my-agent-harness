@@ -28,6 +28,7 @@ from harness.contracts.models import (
     PreparedModelRequest,
     model_input_hash,
 )
+from harness.contracts.release import ReleaseManifest
 from harness.contracts.runtime import (
     AdmissionProfile,
     AnswerCandidate,
@@ -42,6 +43,7 @@ from harness.contracts.writes import DispatchPermit, WritePolicy
 
 
 class PostgresExecutionStore(PostgresWriteStore):
+    delegated_read_hashes: frozenset[str] = frozenset()
     process_identity: ProcessIdentity | None = None
     identity_source: Any = None
     new_run_ready: Callable[[], bool] | None = None
@@ -127,6 +129,20 @@ class PostgresExecutionStore(PostgresWriteStore):
             ):
                 raise RuntimeFault("EXECUTION_AUTHORITY_REVOKED", 403)
         await super()._check_execution(conn, actor, owner, run, session)
+
+    async def authorize_extension_in_transaction(
+        self, conn: Connection, actor: Principal, owner: str, run_id: str
+    ) -> tuple[Row, ReleaseManifest]:
+        """可选扩展复用session→run锁与执行授权；不新增领域分支或外部调用。"""
+        session, row = await self._lock_owned_run(conn, owner, run_id)
+        await self._check_execution(conn, actor, owner, row, session)
+        if Principal.model_validate(row["principal"]) != actor:
+            raise RuntimeFault("EXTENSION_PRINCIPAL_MISMATCH", 403)
+        release = await self._release(conn, actor, session["release_id"])
+        manifest = ReleaseManifest.model_validate(release["manifest"])
+        if row["manifest_hash"] != manifest.content_hash():
+            raise RuntimeFault("EXTENSION_MANIFEST_MISMATCH", 409)
+        return row, manifest
 
     async def begin_dispatch(
         self, actor: Principal, owner: str, operation_id: str
@@ -415,7 +431,10 @@ class PostgresExecutionStore(PostgresWriteStore):
             )
             if (
                 tool.effect not in {"read", "pure"}
-                or tool.cost.billable
+                or (tool.cost.billable and (spec.content_hash not in self.delegated_read_hashes
+                    or run.manifest.profiles.as_object().get("read_accounting", {}) != {
+                        digest: "child-model-ledger@1" for digest in self.delegated_read_hashes
+                    }))
                 or binding is None
                 or run.manifest.tool_schema_hashes.as_object().get(f"{tool.name}@{tool.version}")
                 != spec.content_hash
@@ -509,7 +528,7 @@ class PostgresExecutionStore(PostgresWriteStore):
                 args_hash=row["args_hash"],
                 data=data.materialize() if data else None,
                 error_code=error,
-                cost_status="not_billable",
+                cost_status="unknown" if row["spec_hash"] in self.delegated_read_hashes else "not_billable",
             )
             await conn.execute(
                 "UPDATE harness.read_operations SET state=%s,receipt=%s WHERE operation_id=%s",
@@ -573,6 +592,8 @@ class PostgresExecutionStore(PostgresWriteStore):
                 "SELECT * FROM harness.model_calls WHERE run_id=%s AND model_call_id=%s",
                 (run.run_id, candidate.model_call_id),
             )
+            if self.answer_authority is not None:
+                await self.answer_authority(conn, owner, run, candidate)
             prepared = PreparedModelRequest.model_validate(call["request"])
             if (
                 call["state"] != "succeeded"
@@ -651,6 +672,8 @@ class PostgresExecutionStore(PostgresWriteStore):
                     "SELECT * FROM harness.answer_drafts WHERE run_id=%s FOR UPDATE",
                     (run.run_id,),
                 )
+                if self.answer_authority is not None:
+                    await self.answer_authority(conn, owner, run, candidate)
                 if (
                     draft["state"] != "published"
                     or draft["model_attempt_id"] != candidate.model_attempt_id
