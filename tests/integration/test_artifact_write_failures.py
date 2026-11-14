@@ -35,6 +35,10 @@ async def artifact_write_case(prepared):
     _, original_actor, original, _ = prepared
     actor = original_actor.model_copy(update={"resource_scopes": frozenset({"work_orders:write:synthetic"})})
     store = PostgresExecutionStore(os.environ["HARNESS_M1_TEST_DSN"], AdmissionProfile())
+    from harness.contracts.evaluation_contexts import EvaluationAdmission
+
+    store.profile = store.profile.model_copy(update={"evaluation": EvaluationAdmission(
+        test_resource_scopes=frozenset({"work_orders:write:synthetic"}))})
     settings = load_sandbox_settings(ROOT)
     await initialize(ROOT)
     app = create_sandbox(settings)

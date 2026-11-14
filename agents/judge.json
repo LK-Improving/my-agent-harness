@@ -1,0 +1,11 @@
+{
+  "agent_id": "evaluation_judge", "release_id": "judge-development",
+  "graph_template": "bounded_tool_agent", "graph_version": "create-agent-governed@1",
+  "prompt_ref": "judge/system@1", "model_profile_ref": "qwen-answer-model@1",
+  "knowledge_bindings": [], "allowed_tools": [],
+  "policy_profile_ref": "judge-read-only@1", "budget_profile_ref": "bounded-estimate-standard@1",
+  "memory_profile_ref": "session-only@1", "evaluation_profile_ref": "judge-internal@1",
+  "completion_validator_ref": "evaluation.judge-output@1", "timeout_profile_ref": "standard-interactive@1",
+  "stream_profile_ref": "answer-no-retry-after-publish@1",
+  "execution_limits": {"max_model_steps": 1, "max_tool_dispatches": 1, "read_concurrency": 1}
+}

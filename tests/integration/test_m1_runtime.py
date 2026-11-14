@@ -103,6 +103,11 @@ async def prepared():
             ).fetchone()
             if retention_version is None:
                 await conn.execute((ROOT / "migrations/0009_retention.sql").read_text("utf-8"), prepare=False)
+            evaluation_version = await (
+                await conn.execute("SELECT version FROM harness.schema_versions WHERE version=10")
+            ).fetchone()
+            if evaluation_version is None:
+                await conn.execute((ROOT / "migrations/0010_evaluation_contexts.sql").read_text("utf-8"), prepare=False)
     store = PostgresRuntimeStore(dsn, AdmissionProfile())
     actor = Principal(
         tenant_id="test-" + uuid4().hex,

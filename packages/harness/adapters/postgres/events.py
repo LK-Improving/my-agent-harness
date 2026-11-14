@@ -5,7 +5,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from harness.adapters.postgres.connection import Connection, one
+from harness.adapters.postgres.connection import Connection, observes_event, one, remember_observation
 from harness.contracts.events import RuntimeEvent
 from harness.contracts.runtime import AnswerCandidate, RuntimeFault
 
@@ -62,12 +62,17 @@ class PostgresEventJournal:
     async def _persist(
         conn: Connection, run_id: str, event_type: str, payload: dict[str, Any]
     ) -> None:
+        observed = observes_event(conn, event_type)
+        returning = "RETURNING event_seq,clock_timestamp() AS now"
+        if observed:
+            returning += """, EXISTS (
+                SELECT 1 FROM harness.sessions s WHERE s.session_id=harness.runs.session_id
+                  AND s.revoked_at IS NULL AND s.purged_at IS NULL
+                  AND s.retention_policy->'external_trace_copies'='true'::jsonb
+                ) AS external_trace_allowed"""
         row = await one(
             conn,
-            (
-                "UPDATE harness.runs SET event_seq=event_seq+1 WHERE run_id=%s "
-                "RETURNING event_seq,clock_timestamp() AS now"
-            ),
+            "UPDATE harness.runs SET event_seq=event_seq+1 WHERE run_id=%s " + returning,
             (run_id,),
         )
         event = RuntimeEvent(
@@ -81,3 +86,5 @@ class PostgresEventJournal:
             "INSERT INTO harness.events(run_id,seq,type,payload,timestamp) VALUES(%s,%s,%s,%s,%s)",
             (run_id, event.seq, event.type, Jsonb(event.payload), event.timestamp),
         )
+        if observed and row["external_trace_allowed"]:
+            remember_observation(conn, event)

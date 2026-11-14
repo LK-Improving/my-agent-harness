@@ -1,0 +1,1 @@
+{"version":"m5-answer-judge@1","required":true,"implementation":null,"prompt_sha256":null,"model_binding_ref":null,"dimensions":["authorized_evidence_entailment","version_citation_correctness","no_evidence_decision","degradation_disclosure","instruction_in_evidence_is_data"],"missing_outcome":"incomplete"}

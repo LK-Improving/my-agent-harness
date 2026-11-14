@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import psycopg
 import pytest
 from psycopg import sql
+from psycopg.types.json import Jsonb
 
 from harness.adapters.ingestion_sources import LocalSourceStore
 from harness.adapters.lifecycle_postgres import PostgresLifecycleRepository
@@ -198,6 +199,27 @@ async def test_core_evidence_reference_is_not_removed_by_cleanup(lifecycle_case,
                 .format(ns), (release_id,))
     result = await c.service_cleanup.advance(actor(), job.job_id)
     assert result.state == "blocked" and result.reason == reason and c.indexes.calls == 0
+
+
+async def test_judge_run_copy_blocks_knowledge_cleanup_when_source_run_is_absent(lifecycle_case):
+    c = lifecycle_case
+    job = await c.cleanup.request_delete(actor(), "kb-1", c.request)
+    with psycopg.connect(c.dsn) as conn:
+        ns = sql.Identifier(c.namespace)
+        conn.execute(sql.SQL("INSERT INTO {}.runtime_releases(tenant_id,application_id,release_id,agent_id,manifest_hash,manifest) "
+            "SELECT tenant_id,application_id,'judge-release','judge',%s,"
+            "jsonb_set(manifest,'{{profiles,judge}}',%s,true) FROM {}.runtime_releases LIMIT 1").format(ns, ns),
+            ("f" * 64, Jsonb({"implementation": "synthetic-judge@1"})))
+        conn.execute(sql.SQL("INSERT INTO {}.runtime_sessions(session_id,tenant_id,subject_id,application_id,agent_id,release_id) "
+            "VALUES('judge-session','tenant-1','manager-1','app-1','judge','judge-release')").format(ns))
+        conn.execute(sql.SQL("INSERT INTO {}.runtime_runs(run_id,session_id,request_id,request_hash,request,manifest_hash,"
+            "environment_profile_hash,principal,queue_deadline,expires_at) VALUES('judge-run','judge-session','judge-request',"
+            "%s,'{{}}',%s,%s,'{{}}',clock_timestamp()+interval '1 minute',clock_timestamp()+interval '1 hour')").format(ns),
+            ("a" * 64, "f" * 64, "b" * 64))
+    result = await c.service_cleanup.advance(actor(), job.job_id)
+    assert result.state == "blocked" and result.reason == "JUDGE_EVIDENCE_RETAINED" and c.indexes.calls == 0
+    with psycopg.connect(c.dsn) as conn:
+        assert conn.execute(sql.SQL("SELECT body FROM {}.chunks LIMIT 1").format(sql.Identifier(c.namespace))).fetchone()[0]
 
 
 async def test_revocation_audit_failure_rolls_back_marker(lifecycle_case):

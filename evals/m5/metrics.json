@@ -1,0 +1,1 @@
+{"version":"m5-metrics@1","metrics":["recall_at_5","mrr_at_5","ndcg_at_5","precision_at_5","answer_quality","cost_coverage"],"thresholds":{},"thresholds_confirmed":false}

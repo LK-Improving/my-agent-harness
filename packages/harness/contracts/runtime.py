@@ -6,6 +6,8 @@ from typing import TYPE_CHECKING, Literal, Protocol
 from pydantic import AwareDatetime, Field, JsonValue, field_serializer
 
 from harness.contracts.hashing import RunRequest
+from harness.contracts.evaluation_contexts import EvaluationAdmission, EvaluationLimits, EvaluationRevocationRequest
+from harness.contracts.evaluation_versions import ExecutionVersion
 from harness.contracts.release import EvaluationContext, ReleaseManifest
 from harness.contracts.snapshots import JsonSnapshot
 from harness.contracts.specs import Contract, Identifier, PositiveLimit
@@ -13,6 +15,7 @@ from harness.contracts.state import TaskState, ValidationReport
 
 if TYPE_CHECKING:
     from harness.contracts.writes import SuspensionProof
+    from harness.contracts.evaluation_gates import JudgeModelResponse, JudgeSourceMaterial, RunGateEvidence
 
 
 class Principal(Contract):
@@ -40,6 +43,7 @@ class AdmissionProfile(Contract):
     reads_per_subject_minute: PositiveLimit = 120
     max_sse_per_subject: PositiveLimit = 2
     sse_lease_seconds: PositiveLimit = 30
+    evaluation: EvaluationAdmission = Field(default_factory=EvaluationAdmission)
 
 
 class SessionRequest(Contract):
@@ -60,6 +64,7 @@ class EvaluationRequest(Contract):
     gate_policy_version: Identifier
     resource_scopes: frozenset[str]
     expires_at: AwareDatetime
+    limits: EvaluationLimits = Field(default_factory=EvaluationLimits)
 
 
 class RunView(Contract):
@@ -142,6 +147,20 @@ class RuntimeStore(Protocol):
         self, actor: Principal, request: EvaluationRequest
     ) -> EvaluationContext: ...
 
+    async def inspect_evaluation(self, actor: Principal, context_id: str) -> dict[str, JsonValue]: ...
+
+    async def evaluation_evidence(self, actor: Principal, run_id: str) -> "RunGateEvidence": ...
+
+    async def judge_model_response(
+        self, actor: Principal, run_id: str, call_id: str
+    ) -> "JudgeModelResponse": ...
+
+    async def judge_source_material(self, actor: Principal, run_id: str) -> "JudgeSourceMaterial": ...
+
+    async def revoke_evaluation(
+        self, actor: Principal, context_id: str, request: EvaluationRevocationRequest
+    ) -> dict[str, JsonValue]: ...
+
     async def create_session(self, actor: Principal, request: SessionRequest) -> str: ...
 
     async def create_run(
@@ -166,15 +185,20 @@ class RuntimeStore(Protocol):
 
     async def claim(self, identity: str) -> ClaimedRun | None: ...
 
-    async def started(self, identity: str, run: ClaimedRun, observed_hash: str) -> None: ...
+    async def record_execution_version(self, identity: str, run: ClaimedRun, phase: str,
+        observation: ExecutionVersion | None, error_code: str | None = None) -> int: ...
+
+    async def started(self, identity: str, run: ClaimedRun, observed_hash: str,
+                      *, version_ref: int | None = None) -> None: ...
 
     async def continue_run(self, identity: str, run_id: str) -> bool: ...
 
     async def complete(
-        self, identity: str, run: ClaimedRun, candidate: AnswerCandidate
+        self, identity: str, run: ClaimedRun, candidate: AnswerCandidate, *, version_ref: int | None = None
     ) -> None: ...
 
-    async def fail(self, identity: str, run_id: str, code: str) -> None: ...
+    async def fail(self, identity: str, run_id: str, code: str,
+                   *, version_ref: int | None = None) -> None: ...
 
     async def release_worker(self, identity: str) -> None: ...
 

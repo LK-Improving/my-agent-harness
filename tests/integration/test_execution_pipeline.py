@@ -12,10 +12,12 @@ from harness.adapters.postgres.events import PostgresEventJournal
 from harness.adapters.recovery_postgres import PostgresRecoveryStore
 from harness.bootstrap.checkpoints import saver
 from harness.contracts.execution import ExecutionProfile
+from harness.contracts.events import RuntimeEvent
 from harness.contracts.extensions import ExtensionDecision, ExtensionInvocation, ExtensionSpec
 from harness.contracts.hashing import canonical_hash
 from harness.contracts.model_envelope import chat_envelope_tokens, prepared_chat_envelope
 from harness.contracts.models import ModelResult, ModelUsage, PreparedModelRequest
+from harness.contracts.observability import Observation
 from harness.contracts.release import ReleaseManifest
 from harness.contracts.runtime import (
     AdmissionProfile,
@@ -25,6 +27,7 @@ from harness.contracts.runtime import (
 )
 from harness.contracts.state import ValidationReport
 from harness.graphs.agent import AgentEngine
+from harness.runtime.event_projection import project_events
 from harness.runtime.extensions import ExtensionChain, RegisteredExtension
 from harness.runtime.models import GovernedModelGateway
 from harness.tools.reads import ReadCoordinator
@@ -63,7 +66,10 @@ async def test_official_agent_saver_durable_model_read_and_unique_commit(
             },
         }
     )
-    store = store_type(os.environ["HARNESS_M1_TEST_DSN"], AdmissionProfile())
+    from harness.contracts.evaluation_contexts import EvaluationAdmission
+
+    store = store_type(os.environ["HARNESS_M1_TEST_DSN"], AdmissionProfile(
+        evaluation=EvaluationAdmission(test_resource_scopes=actor.resource_scopes)))
     owner = uuid4().hex
 
     async def policy(invocation):
@@ -119,6 +125,15 @@ async def test_official_agent_saver_durable_model_read_and_unique_commit(
             expires_at=datetime.now(UTC) + timedelta(hours=1),
         ),
     )
+    offered: list[Observation] = []
+
+    class UnavailableSink:
+        def offer(self, observation: Observation) -> None:
+            offered.append(observation)
+            raise RuntimeError("controlled_trace_failure")
+
+    store.retention_policy = store.retention_policy.model_copy(update={"external_trace_copies": True})
+    store.install_observation_sink(UnavailableSink())
     session_id = await store.create_session(
         actor, SessionRequest(agent_id=spec.agent_id, evaluation_context_id=context.context_id)
     )
@@ -270,6 +285,7 @@ async def test_official_agent_saver_durable_model_read_and_unique_commit(
                 patch.setattr(PostgresEventJournal, "_persist", staticmethod(fail_after_completion))
                 with pytest.raises(RuntimeError, match="controlled_commit_fault"):
                     await store.complete(owner, run, candidate)
+            assert all(event.event_type != "run.completed" for event in offered)
             async with store._transaction() as conn:
                 after = await store._one(
                     conn,
@@ -324,6 +340,10 @@ async def test_official_agent_saver_durable_model_read_and_unique_commit(
             assert sum(item["type"] == "run.completed" for item in events) == 1
             deltas = [item["payload"]["delta"] for item in events if item["type"] == "answer.delta"]
             assert len(deltas) >= 3 and "".join(deltas) == candidate.answer
+            projected = project_events(run.run_id, (RuntimeEvent.model_validate(item) for item in events))
+            assert projected.answer == candidate.answer and projected.completion is not None
+            assert sum(event.event_type == "run.completed" for event in offered) == 1
+            assert all(event.trace_id != run.run_id for event in offered)
     finally:
         await store.fail(owner, run.run_id, "TEST_FINISHED")
         await store.finish_slot(owner)

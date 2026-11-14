@@ -1,0 +1,62 @@
+{
+  "version": "evaluation-freeze@1",
+  "files": [
+    {
+      "name": "corpus.jsonl",
+      "sha256": "ace6a0295e19b38af2f80b5c14ae0d0663251ef6b18abeca0b8c96df01139ce9",
+      "size_bytes": 1901
+    },
+    {
+      "name": "development.jsonl",
+      "sha256": "7c4e519e9a72841ef74b8c78e1f3f6e6ce09c4c497d03d04b468628061ae9836",
+      "size_bytes": 6256
+    },
+    {
+      "name": "gates.json",
+      "sha256": "1e49fc64ae72976ee1130e35b2b4f94396ff68350e2eec76fd1762c69dab9740",
+      "size_bytes": 427
+    },
+    {
+      "name": "holdout.jsonl",
+      "sha256": "39af3a967295f9433a4318608596ed76d7b440da56406c331ad71aa427072a6e",
+      "size_bytes": 2158
+    },
+    {
+      "name": "judge.json",
+      "sha256": "d080311204133549c320c9058b56fe6382b25aac87d8a605cdcb27f58b88d344",
+      "size_bytes": 308
+    },
+    {
+      "name": "metrics.json",
+      "sha256": "421e3109252967705f6107d5e6a8e26bf8de0868ebd9535ad80421ff977a7e64",
+      "size_bytes": 171
+    },
+    {
+      "name": "scenarios.jsonl",
+      "sha256": "42d01d7527156bc7551ee51c926f0146804aa87b2ed0280de536110a84209d58",
+      "size_bytes": 13749
+    }
+  ],
+  "development_ids": [
+    "M5Q-q01",
+    "M5Q-q02",
+    "M5Q-q03",
+    "M5Q-q04",
+    "M5Q-q05",
+    "M5Q-q06",
+    "M5Q-q07",
+    "M5Q-q08",
+    "M5Q-q09",
+    "M5Q-q10",
+    "M5Q-q11",
+    "M5Q-q12"
+  ],
+  "holdout_ids": [
+    "M5Q-h01",
+    "M5Q-h02",
+    "M5Q-h03",
+    "M5Q-h04"
+  ],
+  "dataset_hash": "c2594404e2bd1fb8b4c30b80a45498d8306af07a5f1dda435e23ac29fe12ce43",
+  "holdout_for_tuning": false
+}

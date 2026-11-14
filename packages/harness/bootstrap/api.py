@@ -3,6 +3,7 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
 import anyio
@@ -11,9 +12,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from harness.contracts.activation import ActivationRequest
 from harness.contracts.artifacts import ArtifactDeletionRequest, ArtifactRead, ArtifactReader, ArtifactRetention
 from harness.contracts.hashing import RunRequest
 from harness.contracts.release import ReleaseManifest
+from harness.contracts.evaluation_contexts import EvaluationRevocationRequest
 from harness.contracts.retention import CleanupRequest, RetentionManager
 from harness.contracts.runtime import (
     CancelRequest,
@@ -76,8 +79,18 @@ def create_app(
     artifacts: ArtifactReader | None = None,
     artifact_retention: ArtifactRetention | None = None,
     retention: RetentionManager | None = None,
+    activate: Callable[[Principal, str, ActivationRequest], Awaitable[dict[str, str]]] | None = None,
+    close_observations: Callable[[], Awaitable[None]] | None = None,
 ) -> FastAPI:
-    app = FastAPI(title="Agent Harness", version="0.1.0", debug=False)
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        try:
+            yield
+        finally:
+            if close_observations is not None:
+                await close_observations()
+
+    app = FastAPI(title="Agent Harness", version="0.1.0", debug=False, lifespan=lifespan)
     app.add_middleware(BodyLimitMiddleware)
 
     @app.exception_handler(RuntimeFault)
@@ -178,9 +191,27 @@ def create_app(
             "manifest_hash": await store.register_release(actor, body),
         }
 
+    @app.post("/api/v1/agents/{agent_id}/activations")
+    async def activation(agent_id: ResourceId, body: ActivationRequest, actor: Actor) -> dict[str, str]:
+        if activate is None:
+            raise RuntimeFault("ACTIVATION_NOT_CONFIGURED", 503)
+        return await activate(actor, agent_id, body)
+
     @app.post("/api/v1/evaluation-contexts", status_code=201)
     async def evaluation(body: EvaluationRequest, actor: Actor) -> Any:
         return await store.create_evaluation(actor, body)
+
+    @app.get("/api/v1/evaluation-contexts/{context_id}")
+    async def evaluation_view(context_id: ResourceId, actor: Actor, response: Response) -> Any:
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await store.inspect_evaluation(actor, context_id)
+
+    @app.post("/api/v1/evaluation-contexts/{context_id}/revocations")
+    async def evaluation_revoke(context_id: ResourceId, body: EvaluationRevocationRequest,
+                                actor: Actor, response: Response) -> Any:
+        response.headers["Cache-Control"] = "no-store"
+        return await store.revoke_evaluation(actor, context_id, body)
 
     @app.post("/api/v1/sessions", status_code=201)
     async def session(body: SessionRequest, actor: Actor) -> dict[str, str | int]:
@@ -198,6 +229,25 @@ def create_app(
     async def read_run(run_id: ResourceId, actor: Actor) -> Any:
         await store.admit_read(actor)
         return await store.get_run(actor, run_id)
+
+    @app.get("/api/v1/runs/{run_id}/evaluation-evidence")
+    async def evaluation_run_evidence(run_id: ResourceId, actor: Actor, response: Response) -> Any:
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await store.evaluation_evidence(actor, run_id)
+
+    @app.get("/api/v1/runs/{run_id}/evaluation-judge-responses/{call_id}")
+    async def evaluation_judge_response(run_id: ResourceId, call_id: ResourceId,
+                                        actor: Actor, response: Response) -> Any:
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await store.judge_model_response(actor, run_id, call_id)
+
+    @app.get("/api/v1/runs/{run_id}/evaluation-judge-material")
+    async def evaluation_judge_material(run_id: ResourceId, actor: Actor, response: Response) -> Any:
+        await store.admit_read(actor)
+        response.headers["Cache-Control"] = "no-store"
+        return await store.judge_source_material(actor, run_id)
 
     @app.get("/api/v1/approvals")
     async def approvals(actor: Actor, after: str = "", limit: int = 50) -> Any:

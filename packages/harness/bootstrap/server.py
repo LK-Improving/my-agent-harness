@@ -2,21 +2,23 @@
 
 import os
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 
 from dotenv import dotenv_values
 from fastapi import FastAPI
 from pydantic import Field, SecretStr
 
 from harness.adapters.development_auth import DevelopmentAuthenticator, LiveDevelopmentAuthenticator
+from harness.adapters.postgres.activation import PostgresReleaseActivation
 from harness.bootstrap.api import create_app
+from harness.bootstrap.observability import langfuse_sink
 from harness.contracts.runtime import AdmissionProfile
 from harness.contracts.retention import RetentionPolicy
 from harness.contracts.specs import Contract
 
 
 class ServerSettings(Contract):
-    agent_profile: Literal["operations", "travel"] = "operations"
+    agent_profile: Literal["operations", "travel", "judge"] = "operations"
     rag_enabled: bool = False
     database_dsn: SecretStr
     environment: str = "development"
@@ -25,6 +27,8 @@ class ServerSettings(Contract):
     admission: AdmissionProfile = Field(default_factory=AdmissionProfile)
     enable_write_sandbox: bool = False
     retention: RetentionPolicy = Field(default_factory=RetentionPolicy)
+    activation_directory: Path | None = None
+    judge_freeze_directory: Path | None = None
 
 
 def load_server_settings(root: Path) -> ServerSettings:
@@ -45,12 +49,17 @@ def load_server_settings(root: Path) -> ServerSettings:
     selected = values.get("HARNESS_AGENT_PROFILE", "operations")
     retention = RetentionPolicy()
     retention_ref = values.get("HARNESS_RETENTION_PROFILE_FILE")
+    activation_ref = values.get("HARNESS_ACTIVATION_DIRECTORY")
+    judge_freeze_ref = values.get("HARNESS_JUDGE_FREEZE_DIRECTORY") if selected == "judge" else None
     if retention_ref:
         retention = RetentionPolicy.model_validate_json((root / retention_ref).read_text("utf-8"))
-    if selected not in {"operations", "travel"}:
-        raise ValueError("HARNESS_AGENT_PROFILE仅支持operations或travel")
+    if selected not in {"operations", "travel", "judge"}:
+        raise ValueError("HARNESS_AGENT_PROFILE仅支持operations、travel或judge")
+    judge_freeze = (root / judge_freeze_ref).resolve() if judge_freeze_ref else None
+    if judge_freeze is not None and not judge_freeze.is_relative_to(root.resolve()):
+        raise ValueError("Judge 冻结包必须位于当前工作区")
     return ServerSettings(
-        agent_profile="travel" if selected == "travel" else "operations",
+        agent_profile=cast(Literal["operations", "travel", "judge"], selected),
         rag_enabled=values.get("HARNESS_RAG_ENABLED", "false").lower() == "true",
         database_dsn=SecretStr(dsn),
         environment=values.get("HARNESS_ENVIRONMENT", "development"),
@@ -59,6 +68,8 @@ def load_server_settings(root: Path) -> ServerSettings:
         admission=admission,
         enable_write_sandbox=values.get("HARNESS_ENABLE_WRITE_SANDBOX", "false").lower() == "true",
         retention=retention,
+        activation_directory=(root / activation_ref).resolve() if activation_ref else None,
+        judge_freeze_directory=judge_freeze,
     )
 
 
@@ -72,6 +83,14 @@ def application() -> FastAPI:
     from harness.bootstrap.assembly import DevelopmentAssembly
 
     assembly = DevelopmentAssembly(root, owner="api-no-execution", checkpointer=None)
+    observations = langfuse_sink(root, settings.retention.external_trace_copies)
+    if observations is not None:
+        assembly.store.install_observation_sink(observations)
+    activation = None
+    if settings.activation_directory is not None:
+        activation = PostgresReleaseActivation(
+            assembly.store, settings.activation_directory, assembly.observe_execution_version, auth.current,
+        )
     return create_app(
         assembly.store,
         auth.authenticate,
@@ -81,4 +100,6 @@ def application() -> FastAPI:
         artifacts=assembly.artifacts,
         artifact_retention=assembly.artifact_retention,
         retention=assembly.retention,
+        activate=activation.activate if activation else None,
+        close_observations=observations.aclose if observations else None,
     )

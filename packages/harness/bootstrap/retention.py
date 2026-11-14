@@ -49,7 +49,7 @@ async def execute(root: Path, args: argparse.Namespace) -> dict[str, object]:
     store.identity_source = auth
     async with store._transaction() as conn:
         versions = await (await conn.execute("SELECT version FROM harness.schema_versions ORDER BY version")).fetchall()
-        if [row["version"] for row in versions] != list(range(1, 10)):
+        if [row["version"] for row in versions] != list(range(1, 11)):
             raise RuntimeFault("RETENTION_EXPLICIT_MIGRATION_REQUIRED", 503)
     manager = PostgresRetention(store, ConfiguredCopies(settings.database_dsn.get_secret_value(), root))
     if args.command == "request":

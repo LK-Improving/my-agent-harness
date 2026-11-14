@@ -169,6 +169,23 @@ async def test_formal_pg_owner_quota_model_ledger_and_cache(retrieval_case):
         await case.service.retrieve(actor(), "worker-1", case.run_id, "kb-1", changed)
 
 
+async def test_evaluation_projection_reads_actual_child_ledger_without_text_or_vectors(retrieval_case):
+    case = retrieval_case
+    await run_query(case)
+    async with case.repo.uow.transaction() as conn:
+        run = await (await conn.execute("SELECT * FROM harness.runs WHERE run_id=%s", (case.run_id,))).fetchone()
+        session = await (await conn.execute("SELECT * FROM harness.sessions WHERE session_id=%s",
+                                            (run["session_id"],))).fetchone()
+        children = await case.repo.evaluation_retrieval_evidence(conn, actor(), run, session)
+    assert len(children) == 1 and children[0].ticket_binding_valid and children[0].context_binding_valid
+    assert children[0].parent_reserved_tokens == case.profile.parent_token_reservation()
+    assert children[0].calls_used == len(children[0].calls) == 2
+    assert children[0].input_bytes_used == sum(call.input_bytes for call in children[0].calls)
+    assert {call.task_type for call in children[0].calls} == {"embedding", "rerank"}
+    assert all(call.state == "succeeded" and call.result_attempt_id == call.attempt_id for call in children[0].calls)
+    assert "index text" not in children[0].model_dump_json() and "vectors" not in children[0].model_dump_json()
+
+
 async def test_concurrent_request_only_reserves_parent_once(retrieval_case):
     c = retrieval_case
     first, second = await asyncio.gather(c.repo.open(actor(), "worker-1", c.run_id, "kb-1", c.query, c.configuration),

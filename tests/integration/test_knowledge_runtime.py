@@ -201,6 +201,23 @@ async def test_terminal_sse_replay_rechecks_knowledge_grant(knowledge_case):
         await c.store.events(actor(), c.run.run_id, 0)
 
 
+async def test_judge_reference_material_rechecks_current_knowledge_grant(knowledge_case):
+    c = knowledge_case
+    candidate = await c.engine.execute(c.run)
+    await c.store.complete("worker-1", c.run, candidate)
+    async with c.store._transaction() as conn:
+        run, session = await c.store._authorized_run(conn, actor(), c.run.run_id, lock=True)
+        material = await c.repo.judge_reference_material(conn, actor(), run, session)
+    assert material["version"] == "knowledge-judge-material@1"
+    assert material["results"] and material["results"][0]["evidence"]
+    with psycopg.connect(c.dsn) as conn:
+        conn.execute(sql.SQL("DELETE FROM {}.knowledge_grants").format(sql.Identifier(c.namespace)))
+    async with c.store._transaction() as conn:
+        run, session = await c.store._authorized_run(conn, actor(), c.run.run_id, lock=True)
+        with pytest.raises(RuntimeFault, match="ACCESS_DENIED"):
+            await c.repo.judge_reference_material(conn, actor(), run, session)
+
+
 async def test_successful_receipt_can_be_reauthorized_by_new_run_owner_without_dispatch(knowledge_case):
     c = knowledge_case
     await c.context.prepare(c.run, "worker-1")

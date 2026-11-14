@@ -77,6 +77,9 @@ class PostgresWriteStore(PostgresRuntimeStore):
         self, conn: Connection, actor: Principal, owner: str, run: Row, session: Row
     ) -> None:
         await self._session(conn, actor, session["session_id"])
+        if session["evaluation_context_id"]:
+            context = await self._evaluation(conn, actor, session["evaluation_context_id"])
+            self._evaluations.require_binding(context, session, run)
         if run["status"] != "running" or run["owner_id"] != owner or run["recovery_required"]:
             raise RuntimeFault("WRITE_EXECUTION_NOT_OWNED")
         if run["cancel_requested"] or run["now"] >= min(

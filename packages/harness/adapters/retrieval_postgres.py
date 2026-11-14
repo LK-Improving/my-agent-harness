@@ -5,11 +5,13 @@ from collections.abc import Callable
 from datetime import timedelta
 from uuid import uuid4
 
+from pydantic import JsonValue
 from psycopg.types.json import Jsonb
 
 from harness.adapters.execution_postgres import PostgresExecutionStore
 from harness.adapters.postgres.connection import Connection, PostgresUnitOfWork, Row
 from harness.contracts.execution import ExecutionProfile
+from harness.contracts.evaluation_gates import RetrievalChildEvidence, RetrievalModelCallEvidence
 from harness.contracts.hashing import canonical_hash
 from harness.contracts.indexing import IndexBinding
 from harness.contracts.release import ReleaseManifest
@@ -330,3 +332,96 @@ class PostgresRetrievalRepository:
             if ticket.scope.manifest_hash != run["manifest_hash"] or record["result_hash"] != canonical_hash(result.model_dump(mode="json")):
                 raise RuntimeFault("KNOWLEDGE_RESULT_RECEIPT_MISMATCH", 409)
             await self._validate_result(conn, ticket, result)
+
+    async def judge_reference_material(self, conn: Connection, actor: Principal, run: Row, session: Row) -> dict[str, JsonValue]:
+        """仅在当前知识权限与全部返回证据重新核对后提供检索材料。"""
+        await self.authorize_public_read(conn, actor, run, session)
+        rows = await (await conn.execute(
+            "SELECT knowledge_base_id,result,result_hash FROM harness_rag.retrieval_requests "
+            "WHERE run_id=%s AND state='succeeded' ORDER BY knowledge_base_id,retrieval_id LIMIT 5",
+            (run["run_id"],),
+        )).fetchall()
+        release = await self.execution._release(conn, actor, session["release_id"])
+        manifest = ReleaseManifest.model_validate(release["manifest"])
+        expected = {item.knowledge_base_id for item in manifest.spec.knowledge_bindings}
+        if (not rows or len(rows) > 4 or len(rows) != len(expected)
+                or {row["knowledge_base_id"] for row in rows} != expected):
+            raise RuntimeFault("JUDGE_KNOWLEDGE_EVIDENCE_UNAVAILABLE", 409)
+        results: list[JsonValue] = []
+        for row in rows:
+            result = RetrievalResult.model_validate(row["result"])
+            if canonical_hash(result.model_dump(mode="json")) != row["result_hash"]:
+                raise RuntimeFault("KNOWLEDGE_RESULT_RECEIPT_MISMATCH", 409)
+            results.append(result.model_dump(mode="json"))
+        return {"version": "knowledge-judge-material@1", "results": results}
+
+    async def evaluation_retrieval_evidence(
+        self, conn: Connection, actor: Principal, run: Row, session: Row,
+    ) -> tuple[RetrievalChildEvidence, ...]:
+        """只投影当前授权 run 的子账本元数据，不导出文本、向量或完整供应商响应。"""
+        release_row = await self.execution._release(conn, actor, session["release_id"])
+        manifest = ReleaseManifest.model_validate(release_row["manifest"])
+        configuration = RetrievalRelease.model_validate(manifest.profiles.as_object().get("retrieval"))
+        run_actor = Principal.model_validate(run["principal"])
+        rows = await (await conn.execute(
+            "SELECT * FROM harness_rag.retrieval_requests WHERE run_id=%s "
+            "ORDER BY retrieval_id LIMIT 5 FOR SHARE", (run["run_id"],),
+        )).fetchall()
+        if len(rows) > 4:
+            raise RuntimeFault("EVALUATION_RETRIEVAL_LIMIT", 422)
+        children = []
+        for row in rows:
+            ticket = RetrievalTicket.model_validate(row["ticket"])
+            agent_binding = next((item for item in manifest.spec.knowledge_bindings
+                                  if item.knowledge_base_id == row["knowledge_base_id"]), None)
+            bound = (ticket.retrieval_id == row["retrieval_id"] == ticket.scope.context_id
+                     and ticket.scope.owner_kind == "run" and ticket.scope.owner_id == run["run_id"]
+                     and ticket.scope.manifest_hash == run["manifest_hash"] == manifest.content_hash()
+                     and ticket.actor == run_actor and ticket.pin.knowledge_base_id == row["knowledge_base_id"]
+                     and ticket.scope.knowledge_base_id == row["knowledge_base_id"]
+                     and (row["tenant_id"], row["subject_id"], row["application_id"])
+                     == (run_actor.tenant_id, run_actor.subject_id, run_actor.application_id)
+                     and agent_binding is not None and agent_binding.retrieval_profile_ref == ticket.profile.ref
+                     and agent_binding.snapshot_id == ticket.pin.snapshot_id
+                     and ticket.pin in configuration.snapshots and ticket.profile in configuration.profiles
+                     and ticket.index_binding.model_snapshot == configuration.models
+                     and ticket.index_binding.backend_hash == configuration.backend_hash)
+            context = await (await conn.execute(
+                "SELECT * FROM harness_rag.model_contexts WHERE context_id=%s FOR SHARE", (row["retrieval_id"],),
+            )).fetchone()
+            calls: list[RetrievalModelCallEvidence] = []
+            context_scope = None
+            context_limits = None
+            context_valid = None
+            if context is not None:
+                from harness.contracts.retrieval_models import RetrievalLimits
+
+                context_scope = RetrievalScope.model_validate(context["scope"])
+                context_limits = RetrievalLimits.model_validate(context["limits"])
+                context_valid = (context["context_id"] == ticket.scope.context_id
+                    and context["tenant_id"] == ticket.scope.tenant_id
+                    and context["application_id"] == ticket.scope.application_id
+                    and context["owner_kind"] == ticket.scope.owner_kind
+                    and context["owner_id"] == ticket.scope.owner_id
+                    and context["knowledge_base_id"] == ticket.scope.knowledge_base_id
+                    and context["deadline"] == ticket.scope.deadline)
+                raw_calls = await (await conn.execute(
+                    "SELECT call_id,attempt_id,request_fingerprint,binding_hash,task_type,input_bytes,state,"
+                    "result->>'call_id' AS result_call_id,result->>'attempt_id' AS result_attempt_id,"
+                    "result->>'request_fingerprint' AS result_fingerprint,result->>'task_type' AS result_task_type,"
+                    "result->'usage' AS usage,failure->>'dispatch_status' AS dispatch_status,"
+                    "failure->>'billing_status' AS billing_status FROM harness_rag.model_calls "
+                    "WHERE context_id=%s ORDER BY call_id LIMIT 129 FOR SHARE", (row["retrieval_id"],),
+                )).fetchall()
+                if len(raw_calls) > 128:
+                    raise RuntimeFault("EVALUATION_RETRIEVAL_CALL_LIMIT", 422)
+                calls = [RetrievalModelCallEvidence.model_validate(item) for item in raw_calls]
+            children.append(RetrievalChildEvidence(
+                retrieval_id=row["retrieval_id"], knowledge_base_id=row["knowledge_base_id"], state=row["state"],
+                ticket_scope=ticket.scope, ticket_binding_valid=bound, profile_limits=ticket.profile.model_limits,
+                parent_reserved_tokens=row["parent_reserved_tokens"], context_scope=context_scope,
+                context_binding_valid=context_valid, context_limits=context_limits,
+                calls_used=context["calls_used"] if context else None,
+                input_bytes_used=context["input_bytes_used"] if context else None, calls=tuple(calls),
+            ))
+        return tuple(children)

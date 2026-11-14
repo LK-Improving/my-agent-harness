@@ -145,6 +145,13 @@ class PostgresLifecycleRepository:
             "AND application_id=%s AND knowledge_base_id=%s LIMIT 1", scope)).fetchone()
         if references:
             return "RUN_EVIDENCE_RETAINED"
+        # Judge请求可复制目标正文；缺少逐文档副本传播账本时保护同应用全部知识库。
+        judge_copy = await (await conn.execute("SELECT 1 FROM harness.sessions s JOIN harness.releases r "
+            "USING(tenant_id,application_id,release_id) JOIN harness.runs run ON run.session_id=s.session_id "
+            "WHERE s.tenant_id=%s AND s.application_id=%s AND r.manifest->'profiles'->'judge' IS NOT NULL "
+            "LIMIT 1", scope[:2])).fetchone()
+        if judge_copy:
+            return "JUDGE_EVIDENCE_RETAINED"
         binding = Jsonb([{"knowledge_base_id": job["knowledge_base_id"]}])
         sessions = await (await conn.execute("SELECT 1 FROM harness.sessions s JOIN harness.releases r "
             "USING(tenant_id,application_id,release_id) WHERE s.tenant_id=%s AND s.application_id=%s "

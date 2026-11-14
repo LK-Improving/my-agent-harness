@@ -12,6 +12,7 @@ from pydantic import (
 )
 
 from harness.contracts.hashing import canonical_hash
+from harness.contracts.evaluation_contexts import EvaluationLimits
 from harness.contracts.snapshots import JsonSnapshot
 from harness.contracts.specs import AgentSpec, Contract, Identifier, PositiveLimit
 
@@ -118,6 +119,13 @@ class EvaluationContext(Contract):
     resource_scopes: frozenset[str]
     expires_at: AwareDatetime
     revoked_at: AwareDatetime | None = None
+    application_id: Identifier | None = None
+    admission_version: Identifier = "legacy-evaluation@1"
+    limits: EvaluationLimits = Field(default_factory=EvaluationLimits)
+
+    @field_serializer("resource_scopes")
+    def ordered_scopes(self, value: frozenset[str]) -> list[str]:
+        return sorted(value)
 
     def require_access(self, tenant: str, subject: str, now: AwareDatetime) -> None:
         if tenant != self.tenant_id or subject != self.subject_id:

@@ -7,15 +7,22 @@ from datetime import timedelta
 from typing import Any
 from uuid import uuid4
 
+from pydantic import JsonValue
 from psycopg.types.json import Jsonb
 
 from harness.adapters.postgres.connection import Connection, PostgresUnitOfWork, Row, one
 from harness.adapters.postgres.events import PostgresEventJournal
+from harness.adapters.postgres.evaluations import PostgresEvaluationContexts
+from harness.adapters.postgres.evaluation_evidence import PostgresEvaluationEvidence
 from harness.adapters.postgres.lifecycle import PostgresRunLifecycle
 from harness.adapters.postgres.mapping import run_view
 from harness.adapters.postgres.queries import PostgresEvidenceQueries
 from harness.context.boundary import require_memory_boundary
 from harness.contracts.events import RuntimeEvent
+from harness.contracts.observability import ObservationSink
+from harness.contracts.evaluation_contexts import EvaluationRevocationRequest
+from harness.contracts.evaluation_gates import JudgeModelResponse, JudgeSourceMaterial, RetrievalChildEvidence, RunGateEvidence
+from harness.contracts.evaluation_versions import ExecutionVersion
 from harness.contracts.context import ContextProfile, SummaryCommitProfile
 from harness.contracts.hashing import RunRequest, canonical_hash
 from harness.contracts.release import EvaluationContext, ReleaseManifest
@@ -39,8 +46,12 @@ class PostgresRuntimeStore:
     summary_authority: Callable[[Connection, str, ClaimedRun, AnswerCandidate, str], Awaitable[None]] | None = None
     summary_authority_ref: str | None = None
     answer_authority: Callable[[Connection, str, ClaimedRun, AnswerCandidate], Awaitable[None]] | None = None
+    new_run_authority: Callable[[Connection, Principal, Row, Row], Awaitable[None]] | None = None
     resource_authority: Callable[[Connection, Principal, Row, Row], Awaitable[None]] | None = None
     resource_authority_ref: str | None = None
+    judge_material_authority: Callable[[Connection, Principal, Row, Row], Awaitable[JsonValue]] | None = None
+    judge_material_authority_ref: str | None = None
+    retrieval_evidence_authority: Callable[[Connection, Principal, Row, Row], Awaitable[tuple[RetrievalChildEvidence, ...]]] | None = None
     # None仅供旧独立调用方；实际组合根始终设置冻结的已安装manifest集合。
     installed_manifest_hashes: frozenset[str] | None = None
 
@@ -50,6 +61,10 @@ class PostgresRuntimeStore:
         self.profile = profile
         self._events = PostgresEventJournal()
         self._lifecycle = PostgresRunLifecycle(self._events)
+        self._evaluations = PostgresEvaluationContexts(self)
+
+    def install_observation_sink(self, sink: ObservationSink) -> None:
+        self._uow = PostgresUnitOfWork(self._uow.dsn, sink)
 
     @asynccontextmanager
     async def _transaction(self) -> AsyncIterator[Connection]:
@@ -139,72 +154,41 @@ class PostgresRuntimeStore:
     async def create_evaluation(
         self, actor: Principal, request: EvaluationRequest
     ) -> EvaluationContext:
-        self._role(actor, "evaluation_admin")
-        self._role(actor, "evaluator")
-        if not request.resource_scopes <= actor.resource_scopes:
-            raise RuntimeFault("SCOPE_ESCALATION", 403)
-        async with self._transaction() as conn:
-            await self._admit(conn, actor)
-            row = await self._release(conn, actor, request.candidate_release_id)
-            manifest = ReleaseManifest.model_validate(row["manifest"])
-            now = (await self._one(conn, "SELECT clock_timestamp() AS now"))["now"]
-            if not now < request.expires_at <= now + timedelta(hours=24):
-                raise RuntimeFault("INVALID_EVALUATION_EXPIRY", 422)
-            context = EvaluationContext(
-                context_id=uuid4().hex,
-                tenant_id=actor.tenant_id,
-                subject_id=actor.subject_id,
-                agent_id=manifest.spec.agent_id,
-                candidate_release_id=manifest.spec.release_id,
-                manifest_hash=manifest.content_hash(),
-                dataset_hash=request.dataset_hash,
-                gate_policy_version=request.gate_policy_version,
-                environment_profile_hash=manifest.environment_profile_hash,
-                resource_scopes=request.resource_scopes,
-                expires_at=request.expires_at,
-            )
-            await conn.execute(
-                """INSERT INTO harness.evaluation_contexts
-                   (context_id,tenant_id,subject_id,application_id,release_id,context,expires_at)
-                   VALUES(%s,%s,%s,%s,%s,%s,%s)""",
-                (
-                    context.context_id,
-                    actor.tenant_id,
-                    actor.subject_id,
-                    actor.application_id,
-                    context.candidate_release_id,
-                    Jsonb(context.model_dump(mode="json")),
-                    context.expires_at,
-                ),
-            )
-            await self._audit(conn, actor, "evaluation.created", context.context_id)
-            return context
+        return await self._evaluations.create(actor, request)
+
+    async def inspect_evaluation(self, actor: Principal, context_id: str) -> dict[str, Any]:
+        return await self._evaluations.inspect(actor, context_id)
+
+    async def evaluation_evidence(self, actor: Principal, run_id: str) -> RunGateEvidence:
+        return await PostgresEvaluationEvidence(self).inspect(actor, run_id)
+
+    async def judge_model_response(self, actor: Principal, run_id: str, call_id: str) -> JudgeModelResponse:
+        return await PostgresEvaluationEvidence(self).judge_response(actor, run_id, call_id)
+
+    async def judge_source_material(self, actor: Principal, run_id: str) -> JudgeSourceMaterial:
+        return await PostgresEvaluationEvidence(self).judge_material(actor, run_id)
+
+    async def revoke_evaluation(
+        self, actor: Principal, context_id: str, request: EvaluationRevocationRequest
+    ) -> dict[str, Any]:
+        return await self._evaluations.revoke(actor, context_id, request)
 
     async def _evaluation(
-        self, conn: Connection, actor: Principal, context_id: str
+        self, conn: Connection, actor: Principal, context_id: str, *, exclusive: bool = False,
+        require_installed: bool = True,
     ) -> EvaluationContext:
-        self._role(actor, "evaluator")
-        row = await self._one(
-            conn,
-            """SELECT *,clock_timestamp() AS now FROM harness.evaluation_contexts
-               WHERE context_id=%s AND tenant_id=%s AND subject_id=%s AND application_id=%s""",
-            (context_id, actor.tenant_id, actor.subject_id, actor.application_id),
-        )
-        context = EvaluationContext.model_validate(row["context"])
-        if row["revoked_at"] is not None or row["now"] >= row["expires_at"]:
-            raise RuntimeFault("EVALUATION_REVOKED_OR_EXPIRED", 403)
-        if not context.resource_scopes <= actor.resource_scopes:
-            raise RuntimeFault("EVALUATION_SCOPE_REVOKED", 403)
-        return context
+        return await self._evaluations.authorize(conn, actor, context_id, exclusive=exclusive,
+                                                 require_installed=require_installed)
 
     async def create_session(self, actor: Principal, request: SessionRequest) -> str:
         async with self._transaction() as conn:
             await self._admit(conn, actor)
             if request.evaluation_context_id:
-                context = await self._evaluation(conn, actor, request.evaluation_context_id)
+                context = await self._evaluation(conn, actor, request.evaluation_context_id, exclusive=True)
                 if context.agent_id != request.agent_id:
                     raise RuntimeFault("EVALUATION_AGENT_MISMATCH", 403)
                 release_id = context.candidate_release_id
+                await self._evaluations.consume(conn, context, "session")
             else:
                 self._role(actor, "user")
                 row = await self._one(
@@ -234,7 +218,8 @@ class PostgresRuntimeStore:
             return session_id
 
     async def _session(
-        self, conn: Connection, actor: Principal, session_id: str, *, lock: bool = False
+        self, conn: Connection, actor: Principal, session_id: str, *, lock: bool = False,
+        evaluation_exclusive: bool = False, require_installed: bool = True,
     ) -> Row:
         row = await self._one(
             conn,
@@ -250,7 +235,9 @@ class PostgresRuntimeStore:
             if row["retention_now"] >= row["created_at"] + timedelta(seconds=policy.session_seconds):
                 raise RuntimeFault("SESSION_EXPIRED", 410)
         if row["evaluation_context_id"]:
-            await self._evaluation(conn, actor, row["evaluation_context_id"])
+            context = await self._evaluation(conn, actor, row["evaluation_context_id"],
+                                             exclusive=evaluation_exclusive, require_installed=require_installed)
+            self._evaluations.require_binding(context, row)
         else:
             self._role(actor, "user")
         return row
@@ -265,7 +252,7 @@ class PostgresRuntimeStore:
     async def create_run(self, actor: Principal, session_id: str, request: RunRequest) -> RunView:
         async with self._transaction() as conn:
             await self._lock_tenant(conn, actor)
-            session = await self._session(conn, actor, session_id, lock=True)
+            session = await self._session(conn, actor, session_id, lock=True, evaluation_exclusive=True)
             existing = await (
                 await conn.execute(
                     "SELECT * FROM harness.runs WHERE session_id=%s AND request_id=%s",
@@ -310,6 +297,7 @@ class PostgresRuntimeStore:
                 raise RuntimeFault("EXECUTABLE_RELEASE_NOT_INSTALLED", 503)
             if manifest.spec.graph_template != "bounded_tool_agent":
                 raise RuntimeFault("CAPABILITY_NOT_ENABLED", 422)
+            evaluation_deadline = None
             if session["evaluation_context_id"]:
                 context = await self._evaluation(conn, actor, session["evaluation_context_id"])
                 if (
@@ -318,14 +306,16 @@ class PostgresRuntimeStore:
                 ):
                     raise RuntimeFault("EVALUATION_MANIFEST_MISMATCH", 403)
                 actor = actor.model_copy(update={"resource_scopes": context.resource_scopes})
+                await self._evaluations.consume(conn, context, "run")
+                evaluation_deadline = context.expires_at
             run_id = uuid4().hex
             row = await self._one(
                 conn,
                 """INSERT INTO harness.runs(run_id,session_id,request_id,request_hash,request,
                    manifest_hash,environment_profile_hash,principal,queue_deadline,expires_at)
                    VALUES(%s,%s,%s,%s,%s,%s,%s,%s,
-                   clock_timestamp()+%s * interval '1 second',
-                   clock_timestamp()+%s * interval '1 second')
+                   LEAST(clock_timestamp()+%s * interval '1 second',%s),
+                   LEAST(clock_timestamp()+%s * interval '1 second',%s))
                    RETURNING *""",
                 (
                     run_id,
@@ -337,13 +327,18 @@ class PostgresRuntimeStore:
                     manifest.environment_profile_hash,
                     Jsonb(actor.model_dump(mode="json")),
                     self.profile.queue_timeout_seconds,
+                    evaluation_deadline,
                     self.profile.run_timeout_seconds,
+                    evaluation_deadline,
                 ),
             )
             await conn.execute(
                 "UPDATE harness.sessions SET active_run_id=%s WHERE session_id=%s",
                 (run_id, session_id),
             )
+            if self.new_run_authority is not None:
+                # 权限检查与新run及额度同事务；失败不留下包含材料的请求正文。
+                await self.new_run_authority(conn, actor, row, session)
             await self._event(
                 conn,
                 run_id,
@@ -358,18 +353,24 @@ class PostgresRuntimeStore:
             return self._view(row, session)
 
     async def _authorized_run(
-        self, conn: Connection, actor: Principal, run_id: str, *, lock: bool = False
+        self, conn: Connection, actor: Principal, run_id: str, *, lock: bool = False,
+        require_installed: bool = True,
     ) -> tuple[Row, Row]:
         ref = await self._one(
             conn, "SELECT session_id FROM harness.runs WHERE run_id=%s", (run_id,)
         )
-        session = await self._session(conn, actor, ref["session_id"], lock=lock)
+        session = await self._session(conn, actor, ref["session_id"], lock=lock,
+                                      require_installed=require_installed)
         row = await self._one(
             conn,
             "SELECT * FROM harness.runs WHERE run_id=%s" + (" FOR UPDATE" if lock else ""),
             (run_id,),
         )
         execution_actor = Principal.model_validate(row["principal"])
+        if session["evaluation_context_id"]:
+            context = await self._evaluation(conn, actor, session["evaluation_context_id"],
+                                             require_installed=require_installed)
+            self._evaluations.require_binding(context, session, row)
         if not execution_actor.resource_scopes <= actor.resource_scopes:
             raise RuntimeFault("RESOURCE_SCOPE_REVOKED", 403)
         return row, session
@@ -577,9 +578,12 @@ class PostgresRuntimeStore:
             actor = Principal.model_validate(row["principal"])
             if session["evaluation_context_id"]:
                 try:
-                    await self._evaluation(conn, actor, session["evaluation_context_id"])
-                except RuntimeFault:
-                    await self._terminate(conn, row, "failed", "EVALUATION_REVOKED_OR_EXPIRED")
+                    context = await self._evaluation(conn, actor, session["evaluation_context_id"])
+                    self._evaluations.require_binding(context, session, row)
+                except RuntimeFault as error:
+                    if error.status >= 500:
+                        raise
+                    await self._terminate(conn, row, "failed", error.code)
                     return None
             release = await self._release(conn, actor, session["release_id"])
             manifest = ReleaseManifest.model_validate(release["manifest"])
@@ -631,16 +635,65 @@ class PostgresRuntimeStore:
                 else None,
             )
 
-    async def started(self, identity: str, run: ClaimedRun, observed_hash: str) -> None:
+    async def record_execution_version(self, identity: str, run: ClaimedRun, phase: str,
+        observation: ExecutionVersion | None, error_code: str | None = None) -> int:
+        if phase not in {"start", "terminal"} or (observation is None) != (error_code is not None):
+            raise RuntimeFault("EXECUTION_VERSION_RECORD_INVALID", 422)
+        if error_code is not None and (not error_code.isidentifier() or len(error_code) > 128):
+            raise RuntimeFault("EXECUTION_VERSION_RECORD_INVALID", 422)
         async with self._transaction() as conn:
             _, row = await self._lock_owned_run(conn, identity, run.run_id)
+            if row["status"] != "running" or row["manifest_hash"] != run.manifest.content_hash():
+                raise RuntimeFault("EXECUTION_VERSION_RECORD_NOT_OWNED", 409)
+            await self._event(conn, run.run_id, "run.version_observed", {
+                "phase": phase, "execution_identity": identity,
+                "observation": observation.model_dump(mode="json") if observation else None,
+                "error_code": error_code})
+            await self._audit(conn, run.principal, "execution.version_observed", run.run_id)
+            latest = await self._one(conn, "SELECT event_seq FROM harness.runs WHERE run_id=%s", (run.run_id,))
+            return int(latest["event_seq"])
+
+    async def _version_payload(self, conn: Connection, row: Row, reference: int | None,
+                               phase: str, expected: ReleaseManifest | None = None) -> dict[str, Any]:
+        if reference is None:
+            return {}
+        if type(reference) is not int or reference < 1:
+            raise RuntimeFault("EXECUTION_VERSION_REFERENCE_MISMATCH", 422)
+        proof = await self._one(conn, "SELECT seq,payload FROM harness.events WHERE run_id=%s AND seq=%s "
+            "AND type='run.version_observed'", (row["run_id"], reference))
+        payload = proof["payload"]
+        last = await self._one(conn, "SELECT max(seq) AS seq FROM harness.events WHERE run_id=%s "
+            "AND type='run.version_observed' AND payload->>'phase'='start'", (row["run_id"],))
+        if (payload.get("phase") != phase or payload.get("execution_identity") != row["owner_id"]
+                or last["seq"] is None or (phase == "start" and reference != last["seq"])
+                or (phase == "terminal" and reference <= last["seq"])):
+            raise RuntimeFault("EXECUTION_VERSION_REFERENCE_MISMATCH", 409)
+        result: dict[str, Any] = {"version_evidence_seq": reference}
+        if payload.get("observation") is not None:
+            observed = ExecutionVersion.model_validate(payload["observation"])
+            if expected is not None and observed.differences(expected):
+                raise RuntimeFault("EXECUTION_VERSION_MISMATCH", 409)
+            result["observed_manifest_hash"] = observed.observed_manifest_hash
+            result["observed_environment_profile_hash"] = observed.environment_profile_hash
+        elif expected is not None:
+            raise RuntimeFault("EXECUTION_VERSION_UNVERIFIED", 409)
+        return result
+
+    async def started(self, identity: str, run: ClaimedRun, observed_hash: str,
+                      *, version_ref: int | None = None) -> None:
+        async with self._transaction() as conn:
+            session, row = await self._lock_owned_run(conn, identity, run.run_id)
+            if session["evaluation_context_id"]:
+                context = await self._evaluation(conn, run.principal, session["evaluation_context_id"])
+                self._evaluations.require_binding(context, session, row)
             if row["status"] != "running" or observed_hash != row["manifest_hash"]:
                 raise RuntimeFault("OBSERVED_MANIFEST_MISMATCH")
             await self._event(
                 conn,
                 run.run_id,
                 "run.started",
-                {"observed_manifest_hash": observed_hash, "execution_identity": identity},
+                {"observed_manifest_hash": observed_hash, "execution_identity": identity,
+                 **await self._version_payload(conn, row, version_ref, "start", run.manifest)},
             )
 
     async def continue_run(self, identity: str, run_id: str) -> bool:
@@ -652,21 +705,27 @@ class PostgresRuntimeStore:
                 return False
             if session["evaluation_context_id"]:
                 try:
-                    await self._evaluation(
+                    context = await self._evaluation(
                         conn,
                         Principal.model_validate(row["principal"]),
                         session["evaluation_context_id"],
                     )
+                    self._evaluations.require_binding(context, session, row)
                 except RuntimeFault:
                     return False
             return not row["cancel_requested"] and row["now"] < min(
                 row["execution_deadline"], row["expires_at"]
             )
 
-    async def _terminate(self, conn: Connection, row: Row, status: str, code: str) -> None:
-        await self._lifecycle.terminate(conn, row, status, code)
+    async def _terminate(self, conn: Connection, row: Row, status: str, code: str,
+                         version_payload: dict[str, Any] | None = None) -> None:
+        if version_payload:
+            await self._lifecycle.terminate(conn, row, status, code, version_payload=version_payload)
+        else:
+            await self._lifecycle.terminate(conn, row, status, code)
 
-    async def complete(self, identity: str, run: ClaimedRun, candidate: AnswerCandidate) -> None:
+    async def complete(self, identity: str, run: ClaimedRun, candidate: AnswerCandidate,
+                       *, version_ref: int | None = None) -> None:
         digest = canonical_hash(candidate.validation_input())
         report = candidate.validation
         if (
@@ -716,13 +775,15 @@ class PostgresRuntimeStore:
             if read_errors:
                 raise RuntimeFault("READ_EVIDENCE_NOT_COMPLETE")
             if session["evaluation_context_id"]:
-                await self._evaluation(conn, run.principal, session["evaluation_context_id"])
+                context = await self._evaluation(conn, run.principal, session["evaluation_context_id"])
+                self._evaluations.require_binding(context, session, row)
             if row["cancel_requested"] or row["now"] >= row["execution_deadline"]:
                 await self._terminate(
                     conn,
                     row,
                     "cancelled" if row["cancel_requested"] else "expired",
                     "CANCELLED" if row["cancel_requested"] else "EXECUTION_EXPIRED",
+                    version_payload=await self._version_payload(conn, row, version_ref, "terminal"),
                 )
                 return
             if self.answer_authority is not None:
@@ -812,10 +873,12 @@ class PostgresRuntimeStore:
                     "committed_draft_id": candidate.draft_id,
                     "commit_id": commit_id,
                     "result_hash": canonical_hash(result),
+                    **await self._version_payload(conn, row, version_ref, "terminal", run.manifest),
                 },
             )
 
-    async def fail(self, identity: str, run_id: str, code: str) -> None:
+    async def fail(self, identity: str, run_id: str, code: str,
+                   *, version_ref: int | None = None) -> None:
         async with self._transaction() as conn:
             _, row = await self._lock_owned_run(conn, identity, run_id)
             if row["status"] == "running":
@@ -824,7 +887,8 @@ class PostgresRuntimeStore:
                     status = "expired"
                     code = "EXECUTION_EXPIRED"
                 await self._terminate(
-                    conn, row, status, "CANCELLED" if row["cancel_requested"] else code
+                    conn, row, status, "CANCELLED" if row["cancel_requested"] else code,
+                    version_payload=await self._version_payload(conn, row, version_ref, "terminal"),
                 )
 
     async def finish_slot(self, identity: str) -> None:
@@ -872,7 +936,7 @@ class PostgresRuntimeStore:
             ).fetchone()
             return {
                 "database": True,
-                "schema": schema["version"] == 9,
+                "schema": schema["version"] == 10,
                 "worker_registered": worker is not None,
                 "worker_fresh": bool(
                     worker and worker["fresh"] and worker["state"] in {"idle", "running"}

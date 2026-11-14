@@ -1,6 +1,7 @@
 """终止事务中的显式协作顺序；unknown 留待核对，外部 I/O 不进入本模块。"""
 
 from dataclasses import dataclass
+from typing import Any
 
 from harness.adapters.postgres.connection import Connection, Row
 from harness.adapters.postgres.events import PostgresEventJournal
@@ -23,7 +24,8 @@ class PostgresRunLifecycle:
             await conn.execute("""INSERT INTO harness.audit(tenant_id,subject_id,action,resource_id)
                 VALUES(%s,%s,'summary.invalidated',%s)""", (actor.tenant_id, actor.subject_id, candidate["candidate_hash"]))
 
-    async def terminate(self, conn: Connection, row: Row, status: str, code: str) -> None:
+    async def terminate(self, conn: Connection, row: Row, status: str, code: str,
+                        *, version_payload: dict[str, Any] | None = None) -> None:
         if row.get("cancel_requested") or status == "expired":
             await self.invalidate_summary(conn, row, code)
         if self.events.drafts:
@@ -98,7 +100,7 @@ class PostgresRunLifecycle:
             ),
             (row["session_id"], row["run_id"]),
         )
-        await self.events.append(conn, row["run_id"], f"run.{status}", {"code": code})
+        await self.events.append(conn, row["run_id"], f"run.{status}", {"code": code, **(version_payload or {})})
         if self.events.writes:
             # 只有权威未执行证据允许终态释放动作guard；成功和unknown均保留。
             await conn.execute(

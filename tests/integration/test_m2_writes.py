@@ -12,6 +12,7 @@ import pytest_asyncio
 from harness.adapters.writes_postgres import PostgresWriteStore
 from harness.bootstrap.sandbox import create_sandbox, initialize, load_sandbox_settings
 from harness.contracts.hashing import RunRequest, canonical_hash
+from harness.contracts.evaluation_contexts import EvaluationAdmission
 from harness.contracts.release import ReleaseManifest
 from harness.contracts.runtime import (
     AdmissionProfile,
@@ -36,6 +37,8 @@ async def write_case(prepared):
         update={"resource_scopes": frozenset({"work_orders:write:synthetic"})}
     )
     store = PostgresWriteStore(os.environ["HARNESS_M1_TEST_DSN"], AdmissionProfile())
+    store.profile = store.profile.model_copy(update={"evaluation": EvaluationAdmission(
+        test_resource_scopes=frozenset({"work_orders:write:synthetic"}))})
     settings = load_sandbox_settings(ROOT)
     await initialize(ROOT)
     app = create_sandbox(settings)

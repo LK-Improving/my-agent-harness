@@ -1,0 +1,11 @@
+{
+  "version": "development-admission@1",
+  "evaluation": {
+    "version": "evaluation-admission@1",
+    "test_resource_scopes": ["synthetic"],
+    "candidate_release_ids": null,
+    "max_valid_contexts_per_subject": 4,
+    "max_lifetime_seconds": 86400,
+    "limits": {"max_sessions": 64, "max_runs": 128}
+  }
+}

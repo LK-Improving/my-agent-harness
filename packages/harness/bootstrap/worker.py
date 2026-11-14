@@ -11,6 +11,7 @@ from harness.adapters.local_process import current_process
 from harness.bootstrap.assembly import DevelopmentAssembly
 from harness.bootstrap.checkpoints import saver
 from harness.bootstrap.event_loop import run
+from harness.bootstrap.observability import langfuse_sink
 from harness.bootstrap.releases import read_release
 from harness.bootstrap.server import load_server_settings
 from harness.contracts.runtime import RuntimeFault
@@ -44,6 +45,7 @@ async def serve(root: Path, release_manifest: str | None = None) -> None:
             assembly.engine,
             identity=identity,
             checkpoint_timeout_seconds=assembly.profile.checkpoint_verification_timeout_seconds,
+            version_observer=assembly.observe_execution_version,
         )
         loop = asyncio.get_running_loop()
         previous = {}
@@ -52,11 +54,16 @@ async def serve(root: Path, release_manifest: str | None = None) -> None:
             signal.signal(
                 item, lambda signum, frame: loop.call_soon_threadsafe(worker.stop_claiming)
             )
+        observations = langfuse_sink(root, settings.retention.external_trace_copies)
         try:
+            if observations is not None:
+                assembly.store.install_observation_sink(observations)
             await worker.serve()
         finally:
             for item, handler in previous.items():
                 signal.signal(item, handler)
+            if observations is not None:
+                await observations.aclose()
 
 
 def main() -> None:

@@ -26,7 +26,7 @@ async def migrate(root: Path) -> None:
                     )
                 ).fetchall()
                 versions = [row[0] for row in installed]
-                if versions not in [list(range(1, end + 1)) for end in range(1, 10)]:
+                if versions not in [list(range(1, end + 1)) for end in range(1, 11)]:
                     raise ValueError("业务迁移版本不匹配；请使用兼容构建")
             for version, name in (
                 (1, "0001_runtime.sql"),
@@ -38,6 +38,7 @@ async def migrate(root: Path) -> None:
                 (7, "0007_context_purpose.sql"),
                 (8, "0008_context_summaries.sql"),
                 (9, "0009_retention.sql"),
+                (10, "0010_evaluation_contexts.sql"),
             ):
                 if version not in versions:
                     await conn.execute(
