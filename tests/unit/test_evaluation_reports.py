@@ -48,15 +48,27 @@ def report_case(manifest=None):
         last = item["events"][-1]
         last["type"] = "run.completed"
         last["payload"].update({"committed_draft_id": "draft", "commit_id": "commit", "result_hash": digest})
+        # 成功样本必须包含与最终回答一致的持久草稿和增量。
+        base = {"schema_version": 1, "run_id": run_id, "timestamp": item["events"][2]["timestamp"]}
+        item["events"][-2]["seq"] = 6
+        last["seq"] = 7
+        last["payload"]["version_evidence_seq"] = 6
+        item["events"][3:3] = [
+            {**base, "seq": 4, "type": "answer.started", "payload": {
+                "draft_id": "draft", "producer": "model", "model_call_id": "call", "model_attempt_id": "attempt"}},
+            {**base, "seq": 5, "type": "answer.delta", "payload": {
+                "draft_id": "draft", "model_attempt_id": "attempt", "delta": answer["answer"]}},
+        ]
         item["accepted"].update({"run_id": run_id, "session_id": sid, "release_id": manifest.spec.release_id,
             "manifest_hash": manifest.content_hash(), "environment_profile_hash": manifest.environment_profile_hash})
         item["final"].update({**item["accepted"], "status": "succeeded", "result": answer})
         item["ledger_evidence"].update({"run_id": run_id, "session_id": sid, "request_hash": row.input_hash(),
             "manifest_hash": manifest.content_hash(), "environment_profile_hash": manifest.environment_profile_hash,
-            "status": "succeeded", "result_hash": digest,
+            "status": "succeeded", "result_hash": digest, "event_seq": len(item["events"]),
             "validation_checks": {"citation_integrity": True}, "validation_verdict": "pass",
             "event_hashes": [canonical_hash(event) for event in item["events"]]})
-        item["external_observation"].update({"run_id": run_id, "freeze_hash": frozen.content_hash(), "result_hash": digest})
+        item["external_observation"].update({"run_id": run_id, "freeze_hash": frozen.content_hash(),
+                                            "result_hash": digest, "event_seq": len(item["events"])})
         records.append(item)
     collection = {**template, "cases": records, "candidate_manifest": manifest.model_dump(mode="json"),
                   "freeze_hash": frozen.content_hash()}

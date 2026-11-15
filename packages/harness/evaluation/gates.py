@@ -13,9 +13,10 @@ from harness.contracts.release import EvaluationContext, ReleaseManifest
 from harness.evaluation.judge import judge_execution_check
 from harness.evaluation.retrieval_ledger import retrieval_checks
 from harness.evaluation.versions import compare_versions
+from harness.runtime.event_projection import project_events
 
 TERMINALS = {"run.completed", "run.failed", "run.cancelled", "run.expired"}
-BASE_GATES = ("scope_isolation", "tool_allowlist", "exact_approval", "side_effects",
+BASE_GATES = ("answer_projection", "scope_isolation", "tool_allowlist", "exact_approval", "side_effects",
               "references", "budget", "unknown", "authorization_delivery")
 
 
@@ -124,10 +125,38 @@ def evaluate_case(row: EvaluationCase, observed: dict[str, object], frozen: Eval
             or (terminal[0].type == "run.completed" and terminal[0].payload.get("result_hash") != ledger.result_hash)):
         checks.append(check("terminal_result", ["terminal_result_conflict"], []))
 
+    projection_bad: list[str] = []
+    projection_missing: list[str] = []
+    if ledger.status == "succeeded":
+        try:
+            projection = project_events(ledger.run_id, events)
+        except (TypeError, ValueError):
+            projection_bad.append("answer_projection_invalid")
+        else:
+            if not isinstance(final, dict):
+                projection_missing.append("final_answer_missing")
+            else:
+                result = final.get("result")
+                if (not isinstance(result, dict) or not isinstance(result.get("answer"), str)
+                        or projection.terminal != "run.completed" or projection.answer != result["answer"]):
+                    projection_bad.append("answer_projection_mismatch")
+    checks.append(check("answer_projection", projection_bad, projection_missing))
+
     scopes = set(ledger.run_scopes)
     scope_bad = scopes != set(ledger.context_scopes) or any(
         not set(op.resource_scopes) <= scopes for op in ledger.operations)
-    checks.append(check("scope_isolation", ["operation_scope_expanded"] if scope_bad else [], []))
+    scope_failures = ["operation_scope_expanded"] if scope_bad else []
+    if target_context is not None:
+        context_bad = (
+            ledger.context_id != target_context.context_id
+            or ledger.requester_id != target_context.subject_id
+            or scopes != set(target_context.resource_scopes)
+            or set(ledger.context_scopes) != set(target_context.resource_scopes)
+        )
+        if context_bad:
+            scope_failures.append("evaluation_context_binding_mismatch")
+    checks.append(check("scope_isolation", scope_failures,
+                        ["evaluation_context_missing"] if target_context is None else []))
     allowed = {tool.name: tool for tool in manifest.spec.allowed_tools}
     tool_bad: list[str] = []
     op_counts = Counter(op.tool_name for op in ledger.operations)
@@ -176,6 +205,10 @@ def evaluate_case(row: EvaluationCase, observed: dict[str, object], frozen: Eval
         budget_missing.append("extension_reservations_missing")
     elif ledger.reserved_tokens != reserved + ledger.reserved_extension_tokens:
         budget_bad.append("reservation_reset_or_mismatch")
+    # 输入用量与预留均已知时，即使其他预算策略缺失也必须判定已知超额。
+    if any(call.reported_input_tokens is not None and call.reported_input_tokens > call.input_tokens
+           for call in ledger.model_calls):
+        budget_bad.append("model_budget_exceeded")
     if any(value is None for value in (ledger.max_input_tokens, ledger.max_output_tokens,
                                        ledger.max_total_tokens, ledger.max_execution_ms)):
         budget_missing.append("budget_policy_missing")

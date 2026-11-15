@@ -30,6 +30,8 @@ def cost_coverage(breakdown: dict[str, object]) -> GateCheck:
     cost = breakdown.get("cost")
     if not isinstance(cost, dict):
         return GateCheck(gate="cost_coverage", outcome="incomplete", reasons=("cost_evidence_missing",))
+    if cost.get("source_trust") != "verified":
+        return GateCheck(gate="cost_coverage", outcome="incomplete", reasons=("cost_source_unverified",))
     expected = cost.get("expected_cases")
     if type(expected) is not int or expected <= 0 or cost.get("fully_covered_cases") != expected:
         return GateCheck(gate="cost_coverage", outcome="incomplete", reasons=("cost_evidence_incomplete",))

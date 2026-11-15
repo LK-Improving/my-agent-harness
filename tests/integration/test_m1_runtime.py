@@ -166,6 +166,44 @@ async def test_parallel_idempotency_and_conflicting_payload(prepared):
     )
 
 
+async def test_normal_session_replay_rechecks_current_resource_scope(prepared):
+    store, actor, manifest, _ = prepared
+    async with store._transaction() as conn:
+        await conn.execute(
+            "INSERT INTO harness.active_releases(tenant_id,application_id,agent_id,release_id) VALUES(%s,%s,%s,%s)",
+            (actor.tenant_id, actor.application_id, manifest.spec.agent_id, manifest.spec.release_id),
+        )
+    session_id = await store.create_session(actor, SessionRequest(agent_id=manifest.spec.agent_id))
+    request = RunRequest(request_id="scope-replay", message="查询合成工单", expected_revision=0)
+    created = await store.create_run(actor, session_id, request)
+    owner = uuid4().hex
+    await store.register_worker(owner)
+    try:
+        run = await store.claim(owner)
+        assert run is not None and run.run_id == created.run_id
+        await store.started(owner, run, manifest.content_hash())
+        task = TaskState(objective=request.message, source_turn_id=run.run_id)
+        validation = ValidationReport(validator_ref=manifest.spec.completion_validator_ref,
+            input_hash="0" * 64, verdict="pass", checks={"valid": True}, checked_at=datetime.now(UTC))
+        candidate = AnswerCandidate(draft_id="draft", model_call_id="call", model_attempt_id="attempt",
+            answer="合成受限结果", answer_kind="answer", task_outcome="achieved", task=task, validation=validation)
+        candidate = candidate.model_copy(update={"validation": validation.model_copy(
+            update={"input_hash": canonical_hash(candidate.validation_input())})})
+        await store.complete(owner, run, candidate)
+        assert (await store.create_run(actor, session_id, request)).result is not None
+        narrowed = actor.model_copy(update={"resource_scopes": frozenset()})
+        with pytest.raises(RuntimeFault, match="RESOURCE_SCOPE_REVOKED"):
+            await store.get_run(narrowed, run.run_id)
+        with pytest.raises(RuntimeFault, match="RESOURCE_SCOPE_REVOKED"):
+            await store.create_run(narrowed, session_id, request)
+        with pytest.raises(RuntimeFault, match="RESOURCE_SCOPE_REVOKED"):
+            await store.create_run(narrowed, session_id, request.model_copy(update={"message": "不同输入"}))
+    finally:
+        await store.fail(owner, created.run_id, "TEST_FINISHED")
+        await store.finish_slot(owner)
+        await store.release_worker(owner)
+
+
 async def test_unique_commit_old_revision_replay_and_persistent_events(prepared):
     store, actor, manifest, session_id = prepared
     request = RunRequest(request_id="commit-key", message="查询合成工单", expected_revision=0)

@@ -53,6 +53,7 @@ def verify_report(
         or report.get("outcome") != "passed"
         or report.get("release_eligible") is not True
         or gates["outcome"] != "passed"
+        or gates.get("release_eligible") is not True
         or canonical_hash(report.get("absolute_gates")) != canonical_hash(gates)
     ):
         raise RuntimeFault("ACTIVATION_GATES_NOT_PASSED")

@@ -11,6 +11,7 @@ from harness.contracts.evaluation import GatePolicy, JudgePolicy
 from harness.contracts.evaluation_gates import RunGateEvidence
 from harness.contracts.events import RuntimeEvent
 from harness.contracts.hashing import canonical_hash
+from harness.contracts.release import EvaluationContext
 from harness.evaluation.assets import cases, decode
 from harness.evaluation.gates import evaluate_batch, evaluate_case, judge_check
 from tests.unit.test_evaluation_collector import candidate
@@ -49,9 +50,18 @@ def fixture():
     return frozen, manifest, row, observed, judge
 
 
+def context_for(frozen, manifest):
+    return EvaluationContext(context_id="context-1", tenant_id="test", subject_id="requester",
+        application_id="app", agent_id=manifest.spec.agent_id, candidate_release_id=manifest.spec.release_id,
+        manifest_hash=manifest.content_hash(), dataset_hash=frozen.dataset_hash, gate_policy_version="m5-gates@1",
+        environment_profile_hash=manifest.environment_profile_hash, resource_scopes=frozenset({"synthetic"}),
+        expires_at=datetime.now(UTC) + timedelta(hours=1))
+
+
 def result(observed, judge=None):
     frozen, manifest, row, _, default_judge = fixture()
-    return evaluate_case(row, observed, frozen, manifest, judge or default_judge)
+    return evaluate_case(row, observed, frozen, manifest, judge or default_judge,
+                         target_context=context_for(frozen, manifest))
 
 
 def operation(effect="read"):
@@ -95,6 +105,69 @@ def test_no_external_delivery_observation_is_incomplete_not_zero():
     _, _, _, observed, _ = fixture()
     observed.pop("external_observation")
     assert result(observed).outcome == "incomplete"
+
+
+@pytest.mark.parametrize("mutation", ["scopes", "subject", "context_id"])
+def test_scope_gate_binds_run_to_evaluation_context(mutation):
+    _, _, _, observed, _ = fixture()
+    ledger = observed["ledger_evidence"]
+    if mutation == "scopes":
+        ledger["run_scopes"] = ["other"]
+        ledger["context_scopes"] = ["other"]
+    elif mutation == "subject":
+        ledger["requester_id"] = "other"
+    else:
+        ledger["context_id"] = "other"
+    report = result(observed)
+    scope = next(item for item in report.checks if item.gate == "scope_isolation")
+    assert scope.outcome == "failed" and "evaluation_context_binding_mismatch" in scope.reasons
+
+
+def test_missing_evaluation_context_cannot_pass_scope_gate():
+    frozen, manifest, row, observed, judge = fixture()
+    report = evaluate_case(row, observed, frozen, manifest, judge)
+    assert next(item for item in report.checks if item.gate == "scope_isolation").outcome == "incomplete"
+
+
+@pytest.mark.parametrize("missing_policy", [False, True])
+def test_reported_model_input_over_reservation_is_a_hard_budget_failure(missing_policy):
+    _, _, _, observed, _ = fixture()
+    observed["ledger_evidence"].update({
+        "model_steps": 1, "reserved_tokens": 30,
+        "model_calls": [{"call_id": "call-1", "state": "succeeded", "input_tokens": 20,
+                         "reported_input_tokens": 21, "reserved_output_tokens": 10,
+                         "output_tokens": 5, "remaining_total_tokens": 100}],
+    })
+    if missing_policy:
+        observed["ledger_evidence"]["max_output_tokens"] = None
+    report = result(observed)
+    assert next(item for item in report.checks if item.gate == "budget").outcome == "failed"
+    assert report.outcome == "failed"
+
+
+@pytest.mark.parametrize("mutation", ["missing_delta", "different_answer", "other_attempt", "other_draft"])
+def test_target_answer_projection_must_match_persisted_final_result(mutation):
+    from tests.unit.test_evaluation_reports import report_case
+
+    frozen, blobs, manifest, collection = report_case()
+    row = cases(blobs["holdout.jsonl"])[0]
+    observed = deepcopy(collection["cases"][0])
+    delta = next(event for event in observed["events"] if event["type"] == "answer.delta")
+    if mutation == "missing_delta":
+        delta.update({"type": "future.missing", "payload": {}})
+    elif mutation == "different_answer":
+        delta["payload"]["delta"] = "不同的公开回答"
+    elif mutation == "other_attempt":
+        delta["payload"]["model_attempt_id"] = "other"
+    else:
+        observed["events"][-1]["payload"]["committed_draft_id"] = "other"
+    observed["ledger_evidence"]["event_hashes"] = [canonical_hash(event) for event in observed["events"]]
+    context = EvaluationContext.model_validate(collection["evaluation_context"])
+    judge = JudgePolicy(version="synthetic-judge@1", required=False, dimensions=("quality",))
+    report = evaluate_case(row, observed, frozen, manifest, judge, target_context=context)
+    checks = {item.gate: item.outcome for item in report.checks}
+    assert checks["persisted_sse"] == "passed"
+    assert checks["answer_projection"] == "failed" and report.outcome == "failed"
 
 
 def test_valid_write_approval_must_precede_each_attempt_and_external_count_is_required():
@@ -231,16 +304,26 @@ def test_complete_deterministic_subset_keeps_unimplemented_policy_evidence_defer
         item["events"][0]["run_id"] = run_id
         item["events"][-1].update({"run_id": run_id, "type": "run.completed", "payload": {
             "committed_draft_id": "draft", "commit_id": "commit", "result_hash": digest}})
+        base = {"schema_version": 1, "run_id": run_id, "timestamp": item["events"][0]["timestamp"]}
+        item["events"][-1]["seq"] = 4
+        item["events"][1:1] = [
+            {**base, "seq": 2, "type": "answer.started", "payload": {
+                "draft_id": "draft", "producer": "model", "model_call_id": "call", "model_attempt_id": "attempt"}},
+            {**base, "seq": 3, "type": "answer.delta", "payload": {
+                "draft_id": "draft", "model_attempt_id": "attempt", "delta": answer["answer"]}},
+        ]
         item["ledger_evidence"].update({"run_id": run_id, "request_hash": row.input_hash(), "status": "succeeded",
             "result_hash": digest, "validation_checks": {"valid_evidence": True}, "validation_verdict": "pass",
+            "event_seq": len(item["events"]),
             "event_hashes": [canonical_hash(event) for event in item["events"]]})
         item["external_observation"].update({"run_id": run_id, "result_hash": digest,
-            "manifest_hash": manifest.content_hash(), "credential_disclosures": 0,
+            "manifest_hash": manifest.content_hash(), "credential_disclosures": 0, "event_seq": len(item["events"]),
             "coverage": ["authorization_delivery", "credential_exposure"]})
         records.append(item)
     policy = GatePolicy.model_validate(decode(blobs["gates.json"]))
     collection = {"freeze_hash": frozen.content_hash(), "dataset_hash": frozen.dataset_hash,
-                  "gate_policy_version": policy.version, "cases": records}
+                  "gate_policy_version": policy.version, "cases": records,
+                  "evaluation_context": context_for(frozen, manifest).model_dump(mode="json")}
     report = evaluate_batch(collection, frozen, rows, manifest, policy, judge, split="holdout")
     assert report["deterministic_outcome"] == "passed" and report["outcome"] == "incomplete"
     assert report["release_eligible"] is False
@@ -250,7 +333,7 @@ def test_complete_deterministic_subset_keeps_unimplemented_policy_evidence_defer
 
 def test_credential_gate_requires_bound_independent_coverage_and_fails_on_disclosure():
     frozen, manifest, row, observed, judge = fixture()
-    options = {"credential_observation_required": True}
+    options = {"credential_observation_required": True, "target_context": context_for(frozen, manifest)}
     assert evaluate_case(row, observed, frozen, manifest, judge, **options).outcome == "incomplete"
     external = observed["external_observation"]
     external.update({"manifest_hash": manifest.content_hash(), "credential_disclosures": 0,

@@ -62,6 +62,34 @@ def test_even_pinned_self_report_cannot_lower_gate_requirements(materials):
         verify_report(policy, manifest, frozen, blobs, collection, report)
 
 
+def test_pinned_top_level_flag_cannot_override_recomputed_release_eligibility(materials, monkeypatch):
+    policy, manifest, _, blobs, collection, report = materials
+    blobs = dict(blobs)
+    gate = json.loads(blobs["gates.json"])
+    gate["required_evidence"] += ["formal_thresholds", "cost_coverage"]
+    gate["hard_failures"].append("credential_disclosures")
+    blobs["gates.json"] = json.dumps(gate).encode("utf-8")
+    judge = json.loads(blobs["judge.json"])
+    judge["required"] = True
+    blobs["judge.json"] = json.dumps(judge).encode("utf-8")
+    frozen = freeze_assets(blobs)
+    collection["freeze_hash"] = frozen.content_hash()
+    gates = {"outcome": "passed", "release_eligible": False}
+    monkeypatch.setattr("harness.evaluation.activation.absolute", lambda *args: gates)
+    report.update({"freeze_hash": frozen.content_hash(), "collection_hash": canonical_hash(collection),
+                   "absolute_gates": gates, "outcome": "passed", "release_eligible": True})
+    report["report_hash"] = canonical_hash({key: value for key, value in report.items() if key != "report_hash"})
+    policy = policy.model_copy(update={"freeze_hash": frozen.content_hash(), "report_hash": report["report_hash"]})
+    with pytest.raises(RuntimeFault, match="ACTIVATION_GATES_NOT_PASSED"):
+        verify_report(policy, manifest, frozen, blobs, collection, report)
+
+    # 合成未来的受信重算结果，验证拒绝条件不是永久阻断这一接口。
+    gates["release_eligible"] = True
+    report["report_hash"] = canonical_hash({key: value for key, value in report.items() if key != "report_hash"})
+    policy = policy.model_copy(update={"report_hash": report["report_hash"]})
+    assert verify_report(policy, manifest, frozen, blobs, collection, report).context_id == collection["evaluation_context"]["context_id"]
+
+
 def test_collection_mutation_breaks_approved_report_binding(materials):
     policy, manifest, frozen, blobs, collection, report = materials
     collection["cases"].pop()

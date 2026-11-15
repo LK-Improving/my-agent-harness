@@ -5,6 +5,7 @@ from copy import deepcopy
 import pytest
 
 from harness.contracts.evaluation_observations import ObservationBundle
+from harness.contracts.hashing import canonical_hash
 from harness.evaluation.observations import merge_observations
 from tests.unit.test_evaluation_reports import report_case
 
@@ -68,6 +69,23 @@ def test_merge_rejects_unbound_events_and_duplicate_cases():
     bundle["cases"].append(deepcopy(bundle["cases"][0]))
     with pytest.raises(ValueError, match="重复用例"):
         ObservationBundle.model_validate(bundle)
+
+
+@pytest.mark.parametrize("mutation", ["answer", "scope", "subject"])
+def test_merge_rejects_unbound_answer_or_evaluation_identity(mutation):
+    frozen, blobs, manifest, collection, bundle = observation_case()
+    item = collection["cases"][0]
+    if mutation == "answer":
+        delta = next(event for event in item["events"] if event["type"] == "answer.delta")
+        delta["payload"]["delta"] = "与最终结果不同"
+        item["ledger_evidence"]["event_hashes"] = [canonical_hash(event) for event in item["events"]]
+    elif mutation == "scope":
+        item["ledger_evidence"]["run_scopes"] = ["other"]
+        item["ledger_evidence"]["context_scopes"] = ["other"]
+    else:
+        item["ledger_evidence"]["requester_id"] = "other"
+    with pytest.raises(ValueError, match="持久事件或最终结果未绑定"):
+        merge(frozen, blobs, manifest, collection, bundle)
 
 
 def test_judge_receipt_cannot_be_imported_when_judge_is_unconfigured():

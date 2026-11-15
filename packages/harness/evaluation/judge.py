@@ -44,6 +44,7 @@ def prepare_judge_input(
         if not isinstance(raw_events, list) or len(raw_events) > 10000:
             raise ValueError("目标事件无效")
         events = [RuntimeEvent.model_validate(item) for item in raw_events]
+        projection = project_events(ledger.run_id, events)
         versions = compare_versions(collection, frozen, (row,), candidate)
     except (TypeError, ValueError):
         raise ValueError("目标运行证据无效") from None
@@ -53,6 +54,9 @@ def prepare_judge_input(
             or set(ledger.run_scopes) != set(context.resource_scopes)
             or set(ledger.context_scopes) != set(context.resource_scopes)
             or final.get("status") != "succeeded" or final.get("result") is None
+            or not isinstance(final.get("result"), dict)
+            or not isinstance(final["result"].get("answer"), str)
+            or projection.terminal != "run.completed" or projection.answer != final["result"]["answer"]
             or canonical_hash(final["result"]) != ledger.result_hash
             or not events or [event.seq for event in events] != list(range(1, len(events) + 1))
             or any(event.run_id != ledger.run_id for event in events)
@@ -117,6 +121,10 @@ def judge_execution_check(
         or (judge_context.tenant_id, judge_context.subject_id, judge_context.application_id)
         != (target_context.tenant_id, target_context.subject_id, target_context.application_id)
         or judge_context.resource_scopes != target_context.resource_scopes
+        or target.context_id != target_context.context_id
+        or target.requester_id != target_context.subject_id
+        or set(target.run_scopes) != set(target_context.resource_scopes)
+        or set(target.context_scopes) != set(target_context.resource_scopes)
         or judge_context.dataset_hash != frozen.dataset_hash
         or judge_context.gate_policy_version != target_context.gate_policy_version
         or request.case_id != row.case_id or request.target_run_id != target.run_id

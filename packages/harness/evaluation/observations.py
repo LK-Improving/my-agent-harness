@@ -51,7 +51,7 @@ def merge_observations(
         evaluated = evaluate_case(row, record, frozen, candidate, judge, gate_policy_version=policy.version,
                                   target_context=target_context)
         outcomes = {item.gate: item.outcome for item in evaluated.checks}
-        required = ("case_execution", "persisted_sse", "final_result")
+        required = ("case_execution", "persisted_sse", "final_result", "answer_projection", "scope_isolation")
         invalid = ("evidence_identity", "case_input", "persisted_audit", "terminal_result")
         if any(outcomes.get(name) != "passed" for name in required) or any(name in outcomes for name in invalid):
             raise ValueError("采集运行的持久事件或最终结果未绑定")

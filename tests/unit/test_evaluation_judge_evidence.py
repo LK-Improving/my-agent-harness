@@ -124,6 +124,13 @@ def test_judge_requires_real_run_shape_and_actual_model_call_binding():
                        target_context=context).outcome == "incomplete"
 
 
+def test_judge_rejects_target_subject_and_scope_mismatch():
+    for update in ({"requester_id": "other"}, {"run_scopes": ("other",), "context_scopes": ("other",)}):
+        materials = list(governed_judge_case())
+        materials[3] = materials[3].model_copy(update=update)
+        assert verdict(materials).outcome == "failed"
+
+
 def test_missing_judge_manifest_or_model_response_keeps_evaluation_incomplete():
     materials = list(governed_judge_case())
     materials[0] = materials[0].model_copy(update={"judge_manifest_hash": None})
@@ -167,6 +174,18 @@ def test_prepare_judge_input_binds_case_result_and_supplied_material():
     assert request.target_result == item["final"]["result"]
     assert request.target_result_hash == item["ledger_evidence"]["result_hash"]
     assert request.reference_material == {"evidence": "合成材料"}
+
+
+def test_prepare_judge_rejects_mismatched_public_answer_even_with_matching_event_hashes():
+    frozen, blobs, manifest, collection = report_case()
+    row = cases(blobs["holdout.jsonl"])[0]
+    item = collection["cases"][0]
+    delta = next(event for event in item["events"] if event["type"] == "answer.delta")
+    delta["payload"]["delta"] = "与最终结果不同的公开正文"
+    item["ledger_evidence"]["event_hashes"] = [canonical_hash(event) for event in item["events"]]
+    with pytest.raises(ValueError):
+        prepare_judge_input(collection, frozen, blobs, "holdout", manifest, row.case_id,
+                            "synthetic-material@1", {"evidence": "合成材料"})
 
 
 def test_prepare_judge_input_validates_authorized_material_snapshot_binding():

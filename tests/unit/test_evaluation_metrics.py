@@ -6,6 +6,7 @@ from copy import deepcopy
 import pytest
 
 from harness.contracts.evaluation import MetricPolicy
+from harness.contracts.evaluation_metrics import CostObservation
 from harness.contracts.hashing import canonical_hash
 from harness.evaluation.assets import cases, freeze_assets
 from harness.evaluation.metrics import distribution, ranking_scores
@@ -49,9 +50,11 @@ def test_report_partial_cost_and_retrieval_only_use_bound_observations(bound):
         "missing": 2 - int(bound), "not_applicable": 2,
     }
     assert breakdown["cost"]["batch_total_by_currency"] is None
-    assert breakdown["cost"]["known_subtotal_by_currency"] == ({"CNY": "0.03"} if bound else None)
+    assert breakdown["cost"]["known_subtotal_by_currency"] is None
+    assert breakdown["cost"]["reported_subtotal_by_currency"] == ({"CNY": "0.03"} if bound else None)
     assert breakdown["cost"]["categories"]["tool"]["unknown"] == int(bound)
-    assert breakdown["cost"]["coverage"] == 0
+    assert breakdown["cost"]["coverage"] is None
+    assert breakdown["cost"]["source_trust"] == "unverified"
     assert breakdown["memory"]["key_fact_retained"]["not_applicable"] == 4
     assert breakdown["capacity"]["percentiles_ms"]["total_ms"]["n"] == 4
     assert breakdown["capacity"]["percentiles_ms"]["total_ms"]["small_sample"]
@@ -63,7 +66,25 @@ def metric_summary():
     score = {"mean": 0.8, "n": 2, "applicable": 2, "missing": 0, "not_applicable": 0}
     return {"retrieval": {"recall_at_5": dict(score)},
             "quality": {"dimensions": {"support": dict(score)}},
-            "cost": {"expected_cases": 2, "fully_covered_cases": 2, "coverage": 1.0}}
+            "cost": {"expected_cases": 2, "fully_covered_cases": 2, "coverage": 1.0,
+                     "source_trust": "verified"}}
+
+
+def test_final_result_conflict_excludes_metric_observation():
+    frozen, blobs, manifest, collection = report_case()
+    item = collection["cases"][0]
+    ledger = item["ledger_evidence"]
+    item["metric_observation"] = {
+        "source_ref": "synthetic-observer@1", "case_id": item["case_id"], "run_id": ledger["run_id"],
+        "freeze_hash": frozen.content_hash(), "manifest_hash": manifest.content_hash(),
+        "result_hash": ledger["result_hash"], "event_seq": ledger["event_seq"],
+        "ranked_chunk_aliases": ["c02"],
+    }
+    # 保留公开答案文本，只篡改最终结果的其他字段。
+    item["final"]["result"]["answer_kind"] = "answer"
+    report = build_report(collection, frozen, blobs, "holdout", manifest)
+    assert report["metric_breakdown"]["cases"][0]["evidence"] == "missing_or_unbound"
+    assert report["metric_breakdown"]["retrieval"]["recall_at_5"]["n"] == 0
 
 
 def test_thresholds_require_frozen_confirmation_and_complete_scores():
@@ -92,6 +113,9 @@ def test_threshold_failure_wins_over_another_missing_metric():
 def test_cost_coverage_requires_all_cases_and_does_not_convert_unknown_to_zero():
     summary = metric_summary()
     assert cost_coverage(summary).outcome == "passed"
+    summary["cost"]["source_trust"] = "unverified"
+    assert cost_coverage(summary).outcome == "incomplete"
+    summary["cost"]["source_trust"] = "verified"
     summary["cost"]["fully_covered_cases"] = 1
     summary["cost"]["coverage"] = 0.5
     assert cost_coverage(summary).outcome == "incomplete"
@@ -127,17 +151,25 @@ def test_absolute_report_replays_bound_thresholds_and_cost_coverage():
     rows = {row.case_id: row for row in cases(blobs["holdout.jsonl"])}
     for item in collection["cases"]:
         ledger = item["ledger_evidence"]
+        ledger.update({"model_steps": 1, "reserved_tokens": 15,
+            "model_calls": [{"call_id": "call", "state": "succeeded", "price_version_ref": "price@1",
+                             "input_tokens": 10, "reserved_output_tokens": 5, "remaining_total_tokens": 100}]})
         item["external_observation"]["freeze_hash"] = frozen.content_hash()
         item["metric_observation"] = {
             "source_ref": "synthetic-observer@1", "case_id": item["case_id"], "run_id": ledger["run_id"],
             "freeze_hash": frozen.content_hash(), "manifest_hash": manifest.content_hash(),
             "result_hash": ledger["result_hash"], "event_seq": ledger["event_seq"],
             "ranked_chunk_aliases": rows[item["case_id"]].expected["relevant_aliases"],
-            "costs": {name: {"state": "not_billable"} for name in ("model", "tool", "retrieval", "judge")},
+            "costs": {"model": {"state": "known", "amount": "0", "currency": "CNY",
+                                "price_version": "price@1", "covered_call_ids": ["call"]},
+                      **{name: {"state": "not_billable", "covered_call_ids": []}
+                         for name in ("tool", "retrieval", "judge")}},
         }
     report = build_report(collection, frozen, blobs, "holdout", manifest)
-    assert report["absolute_gates"]["outcome"] == "passed"
-    assert report["metric_breakdown"]["threshold_outcome"] == "passed"
+    assert report["absolute_gates"]["outcome"] == "incomplete"
+    assert report["metric_breakdown"]["threshold_outcome"] == "incomplete"
+    assert report["metric_breakdown"]["cost"]["inventory_matched_cases"] == len(collection["cases"])
+    assert report["metric_breakdown"]["cost"]["batch_total_by_currency"] is None
     changed = deepcopy(collection)
     changed["cases"][0]["metric_observation"]["costs"]["model"] = {"state": "unknown"}
     report = build_report(changed, frozen, blobs, "holdout", manifest)
@@ -146,3 +178,50 @@ def test_absolute_report_replays_bound_thresholds_and_cost_coverage():
     changed = deepcopy(collection)
     changed["cases"][0]["metric_observation"]["ranked_chunk_aliases"] = ["other"]
     assert build_report(changed, frozen, blobs, "holdout", manifest)["outcome"] == "failed"
+
+
+def test_cost_inventory_rejects_missing_calls_and_unproven_free_claims():
+    frozen, blobs, manifest, collection = report_case()
+    item = collection["cases"][0]
+    ledger = item["ledger_evidence"]
+    ledger["model_calls"] = [
+        {"call_id": call_id, "state": "succeeded", "price_version_ref": "price@1",
+         "input_tokens": 10, "reserved_output_tokens": 5, "remaining_total_tokens": 100}
+        for call_id in ("call", "model-call-2")
+    ]
+    ledger.update({"model_steps": 2, "reserved_tokens": 30})
+    costs = {name: {"state": "not_billable", "covered_call_ids": []}
+             for name in ("tool", "retrieval", "judge")}
+    costs["model"] = {"state": "known", "amount": "0.1", "currency": "CNY",
+                      "price_version": "price@1", "covered_call_ids": ["call"]}
+    item["metric_observation"] = {
+        "source_ref": "synthetic-observer@1", "case_id": item["case_id"], "run_id": ledger["run_id"],
+        "freeze_hash": frozen.content_hash(), "manifest_hash": manifest.content_hash(),
+        "result_hash": ledger["result_hash"], "event_seq": ledger["event_seq"], "costs": costs,
+    }
+    report = build_report(collection, frozen, blobs, "holdout", manifest)
+    assert report["metric_breakdown"]["cost"]["inventory_matched_cases"] == 0
+    costs["model"]["covered_call_ids"] = ["call", "model-call-2"]
+    report = build_report(collection, frozen, blobs, "holdout", manifest)
+    assert report["metric_breakdown"]["cost"]["inventory_matched_cases"] == 1
+    assert report["metric_breakdown"]["cost"]["coverage"] is None
+    assert report["metric_breakdown"]["cost"]["batch_total_by_currency"] is None
+    costs["model"]["price_version"] = "other-price@1"
+    report = build_report(collection, frozen, blobs, "holdout", manifest)
+    assert report["metric_breakdown"]["cost"]["inventory_matched_cases"] == 0
+    costs["model"]["price_version"] = "price@1"
+    missing_ledger = deepcopy(collection)
+    missing_case = missing_ledger["cases"][0]
+    missing_case["ledger_evidence"]["model_calls"] = [missing_case["ledger_evidence"]["model_calls"][1]]
+    missing_case["ledger_evidence"].update({"model_steps": 1, "reserved_tokens": 15})
+    missing_case["metric_observation"]["costs"]["model"]["covered_call_ids"] = ["model-call-2"]
+    report = build_report(missing_ledger, frozen, blobs, "holdout", manifest)
+    assert report["metric_breakdown"]["cost"]["inventory_matched_cases"] == 0
+    costs["model"] = {"state": "not_billable", "covered_call_ids": ["call", "model-call-2"]}
+    report = build_report(collection, frozen, blobs, "holdout", manifest)
+    assert report["metric_breakdown"]["cost"]["inventory_matched_cases"] == 0
+
+
+def test_cost_observation_rejects_duplicate_call_identities():
+    with pytest.raises(ValueError, match="调用身份不能重复"):
+        CostObservation(state="not_billable", covered_call_ids=("call", "call"))

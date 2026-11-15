@@ -11,9 +11,9 @@ from harness.contracts.evaluation_gates import JudgeReceipt, RunGateEvidence
 from harness.contracts.evaluation_metrics import MetricObservation
 from harness.contracts.events import RuntimeEvent
 from harness.contracts.release import ReleaseManifest
+from harness.evaluation.costs import COST_CATEGORIES, inventory_matches
 from harness.evaluation.gates import TERMINALS
 
-COST_CATEGORIES = ("model", "tool", "retrieval", "judge")
 TIMINGS = ("queue_ms", "total_ms", "first_public_answer_delta_ms", "approval_wait_ms", "execution_used_ms")
 
 
@@ -83,7 +83,7 @@ def summarize(
     amounts: defaultdict[str, Decimal] = defaultdict(Decimal)
     cost_states: dict[str, Counter[str]] = {name: Counter() for name in COST_CATEGORIES}
     price_versions: dict[str, set[str]] = {name: set() for name in COST_CATEGORIES}
-    eligible_runs = completed = full_cost = 0
+    eligible_runs = completed = inventory_cost = 0
     expected_retrieval = expected_memory = expected_no_evidence = 0
 
     for row in rows:
@@ -99,12 +99,14 @@ def summarize(
             "retrieval_applicable": retrieval, "memory_applicable": memory,
             "no_evidence_applicable": no_evidence, "no_evidence_decision": None,
             "costs": dict.fromkeys(COST_CATEGORIES), "cost_total_by_currency": None,
+            "cost_inventory_matches": None,
             "evidence": "missing_or_unbound"}
         results.append(case)
         records = indexed[row.case_id]
         gate_checks = {item["gate"]: item["outcome"] for item in gate_cases[row.case_id]["checks"]}
         if (len(records) != 1 or version_cases.get(row.case_id) != "passed"
-                or any(gate_checks.get(name) != "passed" for name in ("case_execution", "persisted_sse"))
+                or any(gate_checks.get(name) != "passed" for name in
+                       ("case_execution", "persisted_sse", "final_result", "answer_projection", "scope_isolation"))
                 or any(name in gate_checks for name in ("case_input", "persisted_audit", "terminal_result"))
                 or versions["outcome"] == "failed"
                 or gates["checks"]):
@@ -152,18 +154,20 @@ def summarize(
             case["memory"] = memory_scores
             for name, value in memory_scores.items():
                 metric_values[f"memory.{name}"].append(value)
-        case_amounts: defaultdict[str, Decimal] = defaultdict(Decimal)
         for name, cost in observed.costs.items():
             cost_states[name][cost.state] += 1
             if cost.amount is not None and cost.currency is not None and cost.price_version is not None:
-                case_amounts[cost.currency] += cost.amount
                 amounts[cost.currency] += cost.amount
                 price_versions[name].add(cost.price_version)
         case["costs"] = {name: observed.costs[name].model_dump(mode="json") if name in observed.costs else None
                          for name in COST_CATEGORIES}
-        if all(name in observed.costs and observed.costs[name].state != "unknown" for name in COST_CATEGORIES):
-            full_cost += 1
-            case["cost_total_by_currency"] = {key: str(value) for key, value in case_amounts.items()}
+        inventory_bound = inventory_matches(observed, ledger, events, candidate, judge, item.get("judge_execution"),
+                                            budget_passed=gate_checks.get("budget") == "passed",
+                                            unknown_passed=gate_checks.get("unknown") == "passed",
+                                            judge_passed=gate_checks.get("judge") == "passed")
+        case["cost_inventory_matches"] = inventory_bound
+        if inventory_bound:
+            inventory_cost += 1
 
     n = len(rows)
 
@@ -175,7 +179,7 @@ def summarize(
     environment = candidate.profiles.as_object().get("environment")
     environment = environment if isinstance(environment, dict) else {}
     return {
-        "version": "evaluation-metrics-report@1", "metric_policy_version": policy.version,
+        "version": "evaluation-metrics-report@2", "metric_policy_version": policy.version,
         "configured_metrics": list(policy.metrics),
         "thresholds_confirmed": policy.thresholds_confirmed, "threshold_outcome": "not_evaluated",
         "expected_cases": n, "bound_runs": eligible_runs, "cases": results,
@@ -188,9 +192,12 @@ def summarize(
                          for name in ("recall", "precision", "mrr", "ndcg")}},
         "memory": {name: score(f"memory.{name}", expected_memory) for name in
                    ("key_fact_retained", "erroneous_deletion", "correction_followed", "compression_savings")},
-        "cost": {"fully_covered_cases": full_cost, "expected_cases": n, "coverage": full_cost / n if n else None,
-                 "known_subtotal_by_currency": {key: str(value) for key, value in amounts.items()} or None,
-                 "batch_total_by_currency": {key: str(value) for key, value in amounts.items()} if n and full_cost == n else None,
+        # 目前没有受信费用来源验证器；匹配调用清单不等于已核实金额和来源。
+        "cost": {"fully_covered_cases": None, "expected_cases": n, "coverage": None,
+                 "inventory_matched_cases": inventory_cost, "source_trust": "unverified",
+                 "known_subtotal_by_currency": None,
+                 "reported_subtotal_by_currency": {key: str(value) for key, value in amounts.items()} or None,
+                 "batch_total_by_currency": None,
                  "categories": {name: {**{state: cost_states[name][state] for state in ("known", "unknown", "not_billable")},
                                        "missing": n - sum(cost_states[name].values()),
                                        "price_versions": sorted(price_versions[name])} for name in COST_CATEGORIES}},

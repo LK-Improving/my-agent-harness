@@ -261,10 +261,14 @@ class PostgresRuntimeStore:
             ).fetchone()
             # 去重先于 revision、活动运行和新请求额度校验；鉴权永远先于去重。
             if existing:
+                # 命中幂等记录也会返回正文，必须与普通运行读取执行相同的授权复查。
+                existing, authorized_session = await self._authorized_run(
+                    conn, actor, existing["run_id"], lock=True,
+                )
+                await self._authorize_public_resource(conn, actor, existing, authorized_session)
                 if existing["request_hash"] != request.business_hash():
                     raise RuntimeFault("REQUEST_ID_CONFLICT")
-                await self._authorize_public_resource(conn, actor, existing, session)
-                return self._view(existing, session)
+                return self._view(existing, authorized_session)
             ready = getattr(self, "new_run_ready", None)
             if ready is not None and not await asyncio.to_thread(ready):
                 raise RuntimeFault("MODEL_CAPABILITY_OR_CREDENTIAL_NOT_READY", 503)
